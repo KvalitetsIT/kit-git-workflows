@@ -158,6 +158,24 @@ jobs:
         uses: actions/github-script@v7
         with:
           script: |
+            // >>> GitHub username -> Slack user ID map (edit this)
+            // Copy/paste a line to add a user:
+            //   "githubUser": "U0123ABC456",
+            const GH_TO_SLACK = {
+              "mbirchdk": "U020L9U4E1J",
+              "fkokit": "U09CJU6QT6Z",
+              "bork91": "U013QNWS8KA",
+              "henrikmagni": "U0359KM0F41",
+              "luxass": "U09QALE55K8",
+              "orehoj": "U3F0D3F2L",
+              "JonasPed": "UEH3NQQTB",
+              "sunekochhansen": "U87KFM6HW",
+              "MikkelLambaekKIT": "U071ZET4P96",
+              "Batterihane": "U01T61QKJHL",
+              "evtr": "U0WQJ8CK0",
+            };
+            // <<<
+
             const prs = JSON.parse(`${{ steps.find.outputs.prs_json }}`);
 
             const targetBranch = `${{ steps.find.outputs.target_branch }}`;
@@ -166,8 +184,13 @@ jobs:
             const labelTested = `${{ steps.find.outputs.label_tested }}`;
             const labelNoImpact = `${{ steps.find.outputs.label_no_impact }}`;
 
+            function mentionFor(githubLogin) {
+              const slackId = GH_TO_SLACK[githubLogin];
+              return slackId ? `<@${slackId}>` : `@${githubLogin}`;
+            }
+
             const lines = prs.slice(0, 50).map(pr =>
-              `• <${pr.url}|#${pr.number}> — ${pr.title} (by ${pr.author})`
+              `• ${mentionFor(pr.author)} <${pr.url}|#${pr.number}> — ${pr.title}`
             );
 
             let text =
