@@ -110,16 +110,18 @@ jobs:
             core.info(`Search query: ${q}`);
 
             const results = [];
-            let page = 1;
+            const MAX_PAGES = 10;
 
-            while (true) {
+            for (let page = 1; page <= MAX_PAGES; page++) {
               const resp = await github.rest.search.issuesAndPullRequests({
-                q,
+                q,  
                 per_page: 100,
                 page
               });
 
-              for (const item of resp.data.items) {
+              const items = resp.data.items || [];
+
+              for (const item of items) {
                 if (!item.pull_request) continue;
 
                 const labels = (item.labels || []).map(l => (typeof l === "string" ? l : l.name));
@@ -137,9 +139,8 @@ jobs:
                 });
               }
 
-              if (resp.data.items.length < 100) break;
-              page++;
-              if (page > 10) break; // fail-safe
+              // Stop when fewer than 100 results => no more pages
+              if (items.length < 100) break;
             }
 
             core.info(`Found ${results.length} PR(s)`);
