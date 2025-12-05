@@ -1,0 +1,126 @@
+name: PRs created after 2025-10-03 missing "production release tested" after 7 days
+
+on:
+  schedule:
+    - cron: "0 8 * * *" # daily 08:00 UTC (Kl 9 i vintertid, kl 10 i sommertid (DK-tid))
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  notify:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Find PRs created after 2025-10-03, merged >7 days ago to main, missing labels
+        id: find
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
+
+            const LABEL_TESTED = "production release tested";
+            const LABEL_NO_IMPACT = "production release no impact";
+            const CREATED_AFTER = "2025-10-03"; // YYYY-MM-DD
+            const MERGED_DAYS_AGO = 7;
+
+            // cutoff date for merged:< (older than 7 days)
+            const cutoff = new Date(Date.now() - MERGED_DAYS_AGO * 24 * 60 * 60 * 1000);
+            const yyyy = cutoff.getUTCFullYear();
+            const mm = String(cutoff.getUTCMonth() + 1).padStart(2, "0");
+            const dd = String(cutoff.getUTCDate()).padStart(2, "0");
+            const mergedBefore = `${yyyy}-${mm}-${dd}`;
+
+            // GitHub search query:
+            // - merged PRs targeting main
+            // - created after CREATED_AFTER
+            // - merged before mergedBefore (=> merged more than 7 days ago)
+            // - missing BOTH labels: "tested" and "no impact"
+            const q = [
+              `repo:${owner}/${repo}`,
+              `is:pr`,
+              `is:merged`,
+              `base:main`,
+              `created:>${CREATED_AFTER}`,
+              `merged:<${mergedBefore}`,
+              `-label:"${LABEL_TESTED}"`,
+              `-label:"${LABEL_NO_IMPACT}"`
+            ].join(" ");
+
+            core.info(`Search query: ${q}`);
+
+            const results = [];
+            let page = 1;
+
+            while (true) {
+              const resp = await github.rest.search.issuesAndPullRequests({
+                q,
+                per_page: 100,
+                page
+              });
+
+              for (const item of resp.data.items) {
+                if (!item.pull_request) continue;
+
+                const labels = (item.labels || []).map(l => (typeof l === "string" ? l : l.name));
+
+                // Extra guards (even though the query already excludes them)
+                if (labels.includes(LABEL_TESTED)) continue;
+                if (labels.includes(LABEL_NO_IMPACT)) continue;
+
+                results.push({
+                  number: item.number,
+                  title: item.title,
+                  url: item.html_url,
+                  author: item.user?.login ?? "unknown",
+                  merged_at: item.closed_at
+                });
+              }
+
+              if (resp.data.items.length < 100) break;
+              page++;
+              if (page > 10) break; // fail-safe
+            }
+
+            core.info(`Found ${results.length} PR(s)`);
+
+            core.setOutput("count", String(results.length));
+            core.setOutput("prs_json", JSON.stringify(results));
+            core.setOutput("merged_before", mergedBefore);
+
+      - name: Build Slack payload (valid JSON)
+        id: slack
+        if: steps.find.outputs.count != '0'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const prs = JSON.parse(`${{ steps.find.outputs.prs_json }}`);
+            const createdAfter = "2025-10-03";
+            const label = "production release tested";
+            const labelNoImpact = "production release no impact";
+
+            const lines = prs.slice(0, 50).map(pr =>
+              `• <${pr.url}|#${pr.number}> — ${pr.title} (by ${pr.author})`
+            );
+
+            let text =
+              `:warning: *PR’er oprettet efter ${createdAfter} som er merged (til \`main\`) for mere end 1 uge siden og mangler label \`${label}\`* ` +
+              `(og er ikke markeret som \`${labelNoImpact}\`)\n` +
+              lines.join("\n");
+
+            if (prs.length > 50) {
+              text += `\n…og ${prs.length - 50} flere (viser max 50).`;
+            }
+
+            const payload = JSON.stringify({ text });
+            core.setOutput("payload", payload);
+
+      - name: Send to Slack (webhook)
+        if: steps.find.outputs.count != '0'
+        uses: slackapi/slack-github-action@v1.27.0
+        with:
+          payload: ${{ steps.slack.outputs.payload }}
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL_KIT_HOSTING_GITHUB }}
