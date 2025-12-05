@@ -72,22 +72,25 @@ jobs:
       - name: Find merged PRs missing production release labels
         id: find
         uses: actions/github-script@v7
+        env:
+          TARGET_BRANCH: ${{ inputs.target_branch }}
+          CREATED_AFTER: ${{ inputs.created_after }}
+          MERGED_DAYS_AGO: ${{ inputs.merged_days_ago }}
+          LABEL_TESTED: ${{ inputs.label_tested }}
+          LABEL_NO_IMPACT: ${{ inputs.label_no_impact }}
         with:
           script: |
             const owner = context.repo.owner;
             const repo = context.repo.repo;
 
-            const TARGET_BRANCH = `${{ inputs.target_branch }}`.trim() || "main";
-            const CREATED_AFTER = `${{ inputs.created_after }}`.trim() || "2025-12-03";
-            const MERGED_DAYS_AGO_RAW = `${{ inputs.merged_days_ago }}`.trim();
-            const MERGED_DAYS_AGO = Number.parseInt(MERGED_DAYS_AGO_RAW, 10);
+            // Read inputs via env (single source inside JS)
+            const TARGET_BRANCH = (process.env.TARGET_BRANCH || "main").trim();
+            const CREATED_AFTER = (process.env.CREATED_AFTER || "2025-12-03").trim();
+            const LABEL_TESTED = (process.env.LABEL_TESTED || "production release tested").trim();
+            const LABEL_NO_IMPACT = (process.env.LABEL_NO_IMPACT || "production release no impact").trim();
 
-            const LABEL_TESTED = `${{ inputs.label_tested }}`.trim() || "production release tested";
-            const LABEL_NO_IMPACT = `${{ inputs.label_no_impact }}`.trim() || "production release no impact";
-
-            if (!Number.isFinite(MERGED_DAYS_AGO) || MERGED_DAYS_AGO < 0) {
-              throw new Error(`Invalid merged_days_ago: "${MERGED_DAYS_AGO_RAW}"`);
-            }
+            const mergedDaysAgoRaw = (process.env.MERGED_DAYS_AGO || "7").trim();
+            const MERGED_DAYS_AGO = Number.parseInt(mergedDaysAgoRaw, 10);
 
             // cutoff date for merged:< (older than MERGED_DAYS_AGO days)
             const cutoff = new Date(Date.now() - MERGED_DAYS_AGO * 24 * 60 * 60 * 1000);
@@ -114,7 +117,7 @@ jobs:
 
             for (let page = 1; page <= MAX_PAGES; page++) {
               const resp = await github.rest.search.issuesAndPullRequests({
-                q,  
+                q,
                 per_page: 100,
                 page
               });
@@ -147,6 +150,7 @@ jobs:
 
             core.setOutput("count", String(results.length));
             core.setOutput("prs_json", JSON.stringify(results));
+
             core.setOutput("target_branch", TARGET_BRANCH);
             core.setOutput("created_after", CREATED_AFTER);
             core.setOutput("merged_days_ago", String(MERGED_DAYS_AGO));
@@ -173,7 +177,7 @@ jobs:
               "sunekochhansen": "U87KFM6HW",
               "MikkelLambaekKIT": "U071ZET4P96",
               "Batterihane": "U01T61QKJHL",
-              "evtr": "U0WQJ8CK0",
+              "evtr": "U0WQJ8CK0"
             };
             // <<<
 
