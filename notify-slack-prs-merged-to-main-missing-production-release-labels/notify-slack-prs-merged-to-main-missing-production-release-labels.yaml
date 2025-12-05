@@ -1,8 +1,8 @@
-name: PRs created after 2025-10-03 missing "production release tested" after 7 days
+name: Notify Slack about merged PRs missing production release labels
 
 on:
   schedule:
-    - cron: "0 8 * * *" # daily 08:00 UTC (Kl 9 i vintertid, kl 10 i sommertid (DK-tid))
+    - cron: "0 8 * * *" # daily 08:00 UTC (09:00 DK winter time, 10:00 DK summer time)
   workflow_dispatch:
 
 permissions:
@@ -13,9 +13,13 @@ jobs:
   notify:
     runs-on: ubuntu-latest
     steps:
-      - name: Find PRs created after 2025-10-03, merged >7 days ago to main, missing labels
+      - name: Find merged PRs missing production release labels
         id: find
         uses: actions/github-script@v7
+        env:
+          TARGET_BRANCH: ${{ vars.TARGET_BRANCH }}
+          CREATED_AFTER: ${{ vars.CREATED_AFTER }}
+          MERGED_DAYS_AGO: ${{ vars.MERGED_DAYS_AGO }}
         with:
           script: |
             const owner = context.repo.owner;
@@ -23,10 +27,18 @@ jobs:
 
             const LABEL_TESTED = "production release tested";
             const LABEL_NO_IMPACT = "production release no impact";
-            const CREATED_AFTER = "2025-10-03"; // YYYY-MM-DD
-            const MERGED_DAYS_AGO = 7;
 
-            // cutoff date for merged:< (older than 7 days)
+            const TARGET_BRANCH = (process.env.TARGET_BRANCH || "main").trim();
+            const CREATED_AFTER = (process.env.CREATED_AFTER || "2025-12-03").trim();
+
+            // Parse MERGED_DAYS_AGO safely (default 7)
+            const mergedDaysAgoRaw = (process.env.MERGED_DAYS_AGO || "7").trim();
+            const MERGED_DAYS_AGO = Number.parseInt(mergedDaysAgoRaw, 10);
+            if (!Number.isFinite(MERGED_DAYS_AGO) || MERGED_DAYS_AGO < 0) {
+              throw new Error(`Invalid MERGED_DAYS_AGO value: "${mergedDaysAgoRaw}"`);
+            }
+
+            // cutoff date for merged:< (older than MERGED_DAYS_AGO days)
             const cutoff = new Date(Date.now() - MERGED_DAYS_AGO * 24 * 60 * 60 * 1000);
             const yyyy = cutoff.getUTCFullYear();
             const mm = String(cutoff.getUTCMonth() + 1).padStart(2, "0");
@@ -34,15 +46,15 @@ jobs:
             const mergedBefore = `${yyyy}-${mm}-${dd}`;
 
             // GitHub search query:
-            // - merged PRs targeting main
+            // - merged PRs targeting TARGET_BRANCH
             // - created after CREATED_AFTER
-            // - merged before mergedBefore (=> merged more than 7 days ago)
+            // - merged before mergedBefore (=> merged more than MERGED_DAYS_AGO days ago)
             // - missing BOTH labels: "tested" and "no impact"
             const q = [
               `repo:${owner}/${repo}`,
               `is:pr`,
               `is:merged`,
-              `base:main`,
+              `base:${TARGET_BRANCH}`,
               `created:>${CREATED_AFTER}`,
               `merged:<${mergedBefore}`,
               `-label:"${LABEL_TESTED}"`,
@@ -89,6 +101,9 @@ jobs:
             core.setOutput("count", String(results.length));
             core.setOutput("prs_json", JSON.stringify(results));
             core.setOutput("merged_before", mergedBefore);
+            core.setOutput("target_branch", TARGET_BRANCH);
+            core.setOutput("created_after", CREATED_AFTER);
+            core.setOutput("merged_days_ago", String(MERGED_DAYS_AGO));
 
       - name: Build Slack payload (valid JSON)
         id: slack
@@ -97,8 +112,11 @@ jobs:
         with:
           script: |
             const prs = JSON.parse(`${{ steps.find.outputs.prs_json }}`);
-            const createdAfter = "2025-10-03";
-            const label = "production release tested";
+            const targetBranch = `${{ steps.find.outputs.target_branch }}`;
+            const createdAfter = `${{ steps.find.outputs.created_after }}`;
+            const mergedDaysAgo = `${{ steps.find.outputs.merged_days_ago }}`;
+
+            const labelTested = "production release tested";
             const labelNoImpact = "production release no impact";
 
             const lines = prs.slice(0, 50).map(pr =>
@@ -106,7 +124,7 @@ jobs:
             );
 
             let text =
-              `:warning: *PR’er oprettet efter ${createdAfter} som er merged (til \`main\`) for mere end 1 uge siden og mangler label \`${label}\`* ` +
+              `:warning: *PR’er targeting \`${targetBranch}\` oprettet efter ${createdAfter} som har været merged i > ${mergedDaysAgo} dage og mangler label \`${labelTested}\`* ` +
               `(og er ikke markeret som \`${labelNoImpact}\`)\n` +
               lines.join("\n");
 
@@ -114,6 +132,7 @@ jobs:
               text += `\n…og ${prs.length - 50} flere (viser max 50).`;
             }
 
+            // Important: always output VALID JSON (proper escaping for quotes/newlines)
             const payload = JSON.stringify({ text });
             core.setOutput("payload", payload);
 
