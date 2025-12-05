@@ -1,4 +1,32 @@
 name: Notify Slack about merged PRs missing production release labels (reusable)
+# ------------------------------------------------------------------------------------
+# Slack reminder: merged PRs missing production-release labels
+#
+# Get started (per repo)
+#
+# 1) Add Actions variables
+#    GitHub → Repo → Settings → Secrets and variables → Actions → Variables → New repository variable
+#      - TARGET_BRANCH = main (or whatever your repo uses)
+#      - (optional) CREATED_AFTER = 2025-12-03 (YYYY-MM-DD)
+#      - (optional) MERGED_DAYS_AGO = 7 (integer)
+#      - (optional) LABEL_TESTED = production release tested
+#      - (optional) LABEL_NO_IMPACT = production release no impact
+#
+# 2) Add Slack webhook secret
+#    GitHub → Repo → Settings → Secrets and variables → Actions → Secrets → New repository secret
+#      - SLACK_WEBHOOK_URL_KIT_HOSTING_GITHUB = <your Slack Incoming Webhook URL>
+#
+# What it does (conditions)
+# - Runs on schedule (and manual run)
+# - Searches for PRs that are:
+#     - Merged
+#     - Targeting TARGET_BRANCH (base branch)
+#     - Created after CREATED_AFTER
+#     - Merged more than MERGED_DAYS_AGO days ago
+#     - Missing label LABEL_TESTED (default: "production release tested")
+#     - And also missing label LABEL_NO_IMPACT (default: "production release no impact")
+# - Posts matching PRs as clickable links to Slack via the webhook
+# ------------------------------------------------------------------------------------
 
 on:
   workflow_call:
