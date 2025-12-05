@@ -189,9 +189,11 @@ jobs:
               return slackId ? `<@${slackId}>` : `@${githubLogin}`;
             }
 
-            const lines = prs.slice(0, 50).map(pr =>
-              `• ${mentionFor(pr.author)} <${pr.url}|#${pr.number}> — ${pr.title}`
-            );
+            const lines = prs.slice(0, 50).map(pr => {
+              const gh = pr.author || "unknown";
+              const mention = mentionFor(gh);
+              return `• <${pr.url}|#${pr.number}> — ${pr.title} (by ${gh}) ${mention}`;
+            });
 
             let text =
               `:warning: *PR’er targeting \`${targetBranch}\` oprettet efter ${createdAfter} som har været merged i > ${mergedDaysAgo} dage og mangler label \`${labelTested}\`* ` +
