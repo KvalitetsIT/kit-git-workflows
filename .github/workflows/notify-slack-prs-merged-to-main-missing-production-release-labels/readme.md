@@ -8,6 +8,8 @@
    - `TARGET_BRANCH` = `main` (or whatever your repo uses)
    - _(optional)_ `CREATED_AFTER` = `2025-12-03` (YYYY-MM-DD)
    - _(optional)_ `MERGED_DAYS_AGO` = `7` (integer)
+   - _(optional)_ `LABEL_TESTED` = `production release tested` (or whatever your repo uses)
+   - _(optional)_ `LABEL_NO_IMPACT` = `production release no impact` (or whatever your repo uses)
 
 2. **Add Slack webhook secret**  
    GitHub → **Repo** → **Settings** → **Secrets and variables** → **Actions** → **Secrets** → **New repository secret**

@@ -1,9 +1,37 @@
-name: Notify Slack about merged PRs missing production release labels
+name: Notify Slack about merged PRs missing production release labels (reusable)
 
 on:
-  schedule:
-    - cron: "0 8 * * *" # daily 08:00 UTC (09:00 DK winter time, 10:00 DK summer time)
-  workflow_dispatch:
+  workflow_call:
+    inputs:
+      target_branch:
+        description: "Base/target branch to check (e.g. main/master/release)"
+        type: string
+        required: false
+        default: "main"
+      created_after:
+        description: "Only include PRs created after this date (YYYY-MM-DD)"
+        type: string
+        required: false
+        default: "2025-12-03"
+      merged_days_ago:
+        description: "Only include PRs merged more than this many days ago"
+        type: number
+        required: false
+        default: 7
+      label_tested:
+        description: "Label indicating production release has been tested"
+        type: string
+        required: false
+        default: "production release tested"
+      label_no_impact:
+        description: "Label indicating production release has no production impact"
+        type: string
+        required: false
+        default: "production release no impact"
+    secrets:
+      SLACK_WEBHOOK_URL:
+        description: "Slack Incoming Webhook URL"
+        required: true
 
 permissions:
   contents: read
@@ -16,26 +44,21 @@ jobs:
       - name: Find merged PRs missing production release labels
         id: find
         uses: actions/github-script@v7
-        env:
-          TARGET_BRANCH: ${{ vars.TARGET_BRANCH }}
-          CREATED_AFTER: ${{ vars.CREATED_AFTER }}
-          MERGED_DAYS_AGO: ${{ vars.MERGED_DAYS_AGO }}
         with:
           script: |
             const owner = context.repo.owner;
             const repo = context.repo.repo;
 
-            const LABEL_TESTED = "production release tested";
-            const LABEL_NO_IMPACT = "production release no impact";
+            const TARGET_BRANCH = `${{ inputs.target_branch }}`.trim() || "main";
+            const CREATED_AFTER = `${{ inputs.created_after }}`.trim() || "2025-12-03";
+            const MERGED_DAYS_AGO_RAW = `${{ inputs.merged_days_ago }}`.trim();
+            const MERGED_DAYS_AGO = Number.parseInt(MERGED_DAYS_AGO_RAW, 10);
 
-            const TARGET_BRANCH = (process.env.TARGET_BRANCH || "main").trim();
-            const CREATED_AFTER = (process.env.CREATED_AFTER || "2025-12-03").trim();
+            const LABEL_TESTED = `${{ inputs.label_tested }}`.trim() || "production release tested";
+            const LABEL_NO_IMPACT = `${{ inputs.label_no_impact }}`.trim() || "production release no impact";
 
-            // Parse MERGED_DAYS_AGO safely (default 7)
-            const mergedDaysAgoRaw = (process.env.MERGED_DAYS_AGO || "7").trim();
-            const MERGED_DAYS_AGO = Number.parseInt(mergedDaysAgoRaw, 10);
             if (!Number.isFinite(MERGED_DAYS_AGO) || MERGED_DAYS_AGO < 0) {
-              throw new Error(`Invalid MERGED_DAYS_AGO value: "${mergedDaysAgoRaw}"`);
+              throw new Error(`Invalid merged_days_ago: "${MERGED_DAYS_AGO_RAW}"`);
             }
 
             // cutoff date for merged:< (older than MERGED_DAYS_AGO days)
@@ -45,11 +68,6 @@ jobs:
             const dd = String(cutoff.getUTCDate()).padStart(2, "0");
             const mergedBefore = `${yyyy}-${mm}-${dd}`;
 
-            // GitHub search query:
-            // - merged PRs targeting TARGET_BRANCH
-            // - created after CREATED_AFTER
-            // - merged before mergedBefore (=> merged more than MERGED_DAYS_AGO days ago)
-            // - missing BOTH labels: "tested" and "no impact"
             const q = [
               `repo:${owner}/${repo}`,
               `is:pr`,
@@ -78,7 +96,7 @@ jobs:
 
                 const labels = (item.labels || []).map(l => (typeof l === "string" ? l : l.name));
 
-                // Extra guards (even though the query already excludes them)
+                // Extra guards (even though the query excludes them)
                 if (labels.includes(LABEL_TESTED)) continue;
                 if (labels.includes(LABEL_NO_IMPACT)) continue;
 
@@ -100,10 +118,11 @@ jobs:
 
             core.setOutput("count", String(results.length));
             core.setOutput("prs_json", JSON.stringify(results));
-            core.setOutput("merged_before", mergedBefore);
             core.setOutput("target_branch", TARGET_BRANCH);
             core.setOutput("created_after", CREATED_AFTER);
             core.setOutput("merged_days_ago", String(MERGED_DAYS_AGO));
+            core.setOutput("label_tested", LABEL_TESTED);
+            core.setOutput("label_no_impact", LABEL_NO_IMPACT);
 
       - name: Build Slack payload (valid JSON)
         id: slack
@@ -112,12 +131,12 @@ jobs:
         with:
           script: |
             const prs = JSON.parse(`${{ steps.find.outputs.prs_json }}`);
+
             const targetBranch = `${{ steps.find.outputs.target_branch }}`;
             const createdAfter = `${{ steps.find.outputs.created_after }}`;
             const mergedDaysAgo = `${{ steps.find.outputs.merged_days_ago }}`;
-
-            const labelTested = "production release tested";
-            const labelNoImpact = "production release no impact";
+            const labelTested = `${{ steps.find.outputs.label_tested }}`;
+            const labelNoImpact = `${{ steps.find.outputs.label_no_impact }}`;
 
             const lines = prs.slice(0, 50).map(pr =>
               `• <${pr.url}|#${pr.number}> — ${pr.title} (by ${pr.author})`
@@ -132,9 +151,7 @@ jobs:
               text += `\n…og ${prs.length - 50} flere (viser max 50).`;
             }
 
-            // Important: always output VALID JSON (proper escaping for quotes/newlines)
-            const payload = JSON.stringify({ text });
-            core.setOutput("payload", payload);
+            core.setOutput("payload", JSON.stringify({ text }));
 
       - name: Send to Slack (webhook)
         if: steps.find.outputs.count != '0'
@@ -142,4 +159,4 @@ jobs:
         with:
           payload: ${{ steps.slack.outputs.payload }}
         env:
-          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL_KIT_HOSTING_GITHUB }}
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
