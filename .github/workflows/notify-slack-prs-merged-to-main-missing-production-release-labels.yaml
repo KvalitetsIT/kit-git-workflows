@@ -197,12 +197,13 @@ jobs:
             const lines = prs.slice(0, 50).map(pr => {
               const gh = pr.author || "unknown";
               const mention = mentionFor(gh);
+              // Slack link-format uden <...> wrapper (som i dit eksempel)
               return `• <${pr.url}|#${pr.number}> — ${pr.title} (by ${gh}) ${mention}`;
             });
 
             let text =
-              `:warning: *PR’er targeting \`${targetBranch}\` oprettet efter ${createdAfter} som har været merged i > ${mergedDaysAgo} dage og mangler label \`${labelTested}\`* ` +
-              `(og er ikke markeret som \`${labelNoImpact}\`)\n` +
+              `:warning: ${context.repo.owner}/${context.repo.repo} — PR’er til ${targetBranch}.\n` +
+              `PR’s ændringer kan potentielt være kommet i produktions-miljøet, så der skal tages stilling til label: ${labelTested} eller ${labelNoImpact}\n` +
               lines.join("\n");
 
             if (prs.length > 50) {
