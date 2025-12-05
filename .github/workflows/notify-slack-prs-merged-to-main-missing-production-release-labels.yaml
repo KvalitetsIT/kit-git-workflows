@@ -202,8 +202,9 @@ jobs:
             });
 
             let text =
-              `:warning: ${context.repo.owner}/${context.repo.repo} — PR’er til ${targetBranch}.\n` +
-              `PR’s ændringer kan potentielt være kommet i produktions-miljøet, så der skal tages stilling til label: ${labelTested} eller ${labelNoImpact}\n` +
+              `:warning: *${context.repo.owner}/${context.repo.repo} — PR’er til ${targetBranch}.*\n` +
+              `PR’s ændringer kan potentielt være kommet i produktions-miljøet, så der skal tages stilling til label: ` +
+              `\`${labelTested}\` eller \`${labelNoImpact}\`\n` +
               lines.join("\n");
 
             if (prs.length > 50) {
