@@ -2,6 +2,12 @@
 
 This repository contains **reusable GitHub Actions workflows** that are meant to be referenced from other repositories in the **KvalitetsIT** GitHub org. The goal is to keep workflow logic in one place, while each repo can configure it with its own secrets/variables.
 
+## Available Workflows
+
+| Workflow                                                                                                                                                           | Description                                                                                                           |
+| :----------------------------------------------------------------------------------------------------------------------------------------------------------------- | :-------------------------------------------------------------------------------------------------------------------- |
+| [notify-slack-prs-merged-to-main-missing-production-release-labels.yaml](.github/workflows/notify-slack-prs-merged-to-main-missing-production-release-labels.yaml) | Sends a Slack notification listing merged PRs that are missing the "production release tested" or "no impact" labels. |
+
 ---
 
 ## How to use a shared workflow from your repo
