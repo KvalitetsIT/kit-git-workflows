@@ -55,6 +55,10 @@ jobs:
   checklist-check:
     runs-on: ubuntu-latest
     steps:
-      - uses: kentaro-m/task-completed-checker-action@v0.1.2
+      - uses: actions/github-script@v7
         with:
-          repo-token: "${{ github.token }}"
+          script: |
+            const body = context.payload.pull_request?.body || "";
+            const cleaned = body.replace(/<!-- ignore-task-list-start -->[\s\S]*?<!-- ignore-task-list-end -->/g, "");
+            const unchecked = (cleaned.match(/^\s*-\s*\[\s*\]\s+/gm) || []).length;
+            if (unchecked) core.setFailed(`${unchecked} unchecked checklist item(s) found in PR description.`);
