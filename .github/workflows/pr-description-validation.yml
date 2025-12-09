@@ -1,0 +1,60 @@
+name: PR Body Validation (Reusable)
+# Validates PR description quality gates:
+# - Required text blocks: If <!-- required-text-start -->...<!-- required-text-end --> blocks exist, each must be non-empty
+#   - If no blocks exist, the check passes
+#   - Fails on unbalanced tags (start without end or end without start)
+# - Checklist: Fails if the PR checklist contains any unchecked tasks (via task-completed-checker)
+
+
+on:
+  workflow_call:
+    inputs:
+      start_tag:
+        type: string
+        required: false
+        default: "<!-- required-text-start -->"
+      end_tag:
+        type: string
+        required: false
+        default: "<!-- required-text-end -->"
+      min_length:
+        type: number
+        required: false
+        default: 10
+
+permissions:
+  pull-requests: read
+
+jobs:
+  required-text-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Fail if required-text region is empty
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const body = context.payload.pull_request?.body || "";
+            const startTag = `${{ inputs.start_tag }}`;
+            const endTag   = `${{ inputs.end_tag }}`;
+            const minLen   = Math.max(1, Number(`${{ inputs.min_length }}`) || 1);
+
+            const esc = s => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
+            if (body.includes(startTag) && !body.includes(endTag))
+              return core.setFailed("Found required-text-start but no required-text-end.");
+            if (body.includes(endTag) && !body.includes(startTag))
+              return core.setFailed("Found required-text-end but no required-text-start.");
+
+            const re = new RegExp(`${esc(startTag)}([\\s\\S]*?)${esc(endTag)}`, "g");
+            const matches = [...body.matchAll(re)];
+            if (matches.length === 0) return;
+
+            const bad = matches.filter(m => ((m[1] || "").replace(/\s+/g, "")).length < minLen).length;
+            if (bad) core.setFailed(`${bad} required-text block(s) are empty. Fill in text between the tags.`);
+
+  checklist-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: kentaro-m/task-completed-checker-action@v0.1.2
+        with:
+          repo-token: "${{ github.token }}"
