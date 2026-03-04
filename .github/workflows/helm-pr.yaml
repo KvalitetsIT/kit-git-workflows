@@ -110,7 +110,7 @@ jobs:
         run: |
           while IFS= read -r ns; do
             [[ -z "$ns" ]] && continue
-            kubectl create namespace "$ns" || true
+            kubectl create namespace "$ns" 2>/dev/null || kubectl get namespace "$ns" >/dev/null
           done <<< "$NAMESPACES"
 
       - name: Run chart-testing (install)
