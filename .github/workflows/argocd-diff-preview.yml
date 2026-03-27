@@ -256,58 +256,70 @@ jobs:
             username: not-used
           EOF_SECRET
 
-          if [ -z "${REPO_SSH_PRIVATE_KEY}" ]; then
-            if grep -R -n -E --include='*.yaml' --include='*.yml' 'repoURL:[[:space:]]*(git@github\.com:|ssh://git@github\.com)' "${GITHUB_WORKSPACE}/main" "${GITHUB_WORKSPACE}/pull-request" >/dev/null 2>&1; then
-              echo "::warning::Found SSH-based repoURL entries, but no repo_ssh_private_key was provided. Rendering may fail with SSH_AUTH_SOCK errors."
-            fi
+          mapfile -t ssh_hosts < <(
+            grep -R -h -E --include='*.yaml' --include='*.yml' 'repoURL:[[:space:]]*(git@|ssh://git@)' "${GITHUB_WORKSPACE}/main" "${GITHUB_WORKSPACE}/pull-request" \
+              | awk '
+                  {
+                    value = $0
+                    sub(/.*repoURL:[[:space:]]*/, "", value)
+                    gsub(/"/, "", value)
+                    if (match(value, /^git@([^:\/]+)[:\/]/, m)) {
+                      print m[1]
+                    } else if (match(value, /^ssh:\/\/git@([^:\/]+)(:[0-9]+)?\//, m)) {
+                      print m[1]
+                    }
+                  }
+                ' \
+              | sort -u
+          )
+
+          if [ "${#ssh_hosts[@]}" -gt 0 ] && [ -z "${REPO_SSH_PRIVATE_KEY}" ]; then
+            echo "::error::Found SSH-based repoURL entries, but repo_ssh_private_key is not provided."
+            echo "::error::Add 'repo_ssh_private_key' in caller workflow secrets mapping (or use secrets: inherit)."
+            printf '::error::Detected SSH hosts: %s\n' "$(IFS=,; echo "${ssh_hosts[*]}")"
+            exit 1
           fi
 
+          write_ssh_repo_cred() {
+            local secret_name="$1"
+            local secret_url="$2"
+            local secret_file="secrets/${secret_name}.yaml"
+
+            cat > "${secret_file}" <<EOF_SSH_SECRET
+          apiVersion: v1
+          kind: Secret
+          metadata:
+            name: ${secret_name}
+            namespace: argocd
+            labels:
+              argocd.argoproj.io/secret-type: repo-creds
+          stringData:
+            url: ${secret_url}
+            sshPrivateKey: |
+          EOF_SSH_SECRET
+
+            printf '%s\n' "${REPO_SSH_PRIVATE_KEY}" | sed 's/^/    /' >> "${secret_file}"
+          }
+
           if [ -n "${REPO_SSH_PRIVATE_KEY}" ]; then
-            cat > secrets/secret-ssh.yaml <<EOF_SSH
-          apiVersion: v1
-          kind: Secret
-          metadata:
-            name: private-repo-ssh
-            namespace: argocd
-            labels:
-              argocd.argoproj.io/secret-type: repo-creds
-          stringData:
-            url: git@github.com:
-            sshPrivateKey: |
-          EOF_SSH
+            if [ "${#ssh_hosts[@]}" -eq 0 ]; then
+              default_host="$(printf '%s' "${REPO_URL}" | sed -E 's#https?://([^/]+)/?.*#\1#')"
+              ssh_hosts=("${default_host}")
+              echo "No SSH repoURL found during scan. Adding SSH repo-creds for default host: ${default_host}"
+            fi
 
-            printf '%s\n' "${REPO_SSH_PRIVATE_KEY}" | sed 's/^/    /' >> secrets/secret-ssh.yaml
+            for host in "${ssh_hosts[@]}"; do
+              safe_host="$(printf '%s' "${host}" | tr '[:upper:]' '[:lower:]' | sed -E 's/[^a-z0-9]+/-/g; s/^-+//; s/-+$//')"
+              if [ -z "${safe_host}" ]; then
+                safe_host="host"
+              fi
 
-            cat > secrets/secret-ssh-url.yaml <<EOF_SSH_URL
-          apiVersion: v1
-          kind: Secret
-          metadata:
-            name: private-repo-ssh-url
-            namespace: argocd
-            labels:
-              argocd.argoproj.io/secret-type: repo-creds
-          stringData:
-            url: ssh://git@github.com/
-            sshPrivateKey: |
-          EOF_SSH_URL
+              write_ssh_repo_cred "private-repo-ssh-${safe_host}-scp" "git@${host}:"
+              write_ssh_repo_cred "private-repo-ssh-${safe_host}-url" "ssh://git@${host}/"
+              write_ssh_repo_cred "private-repo-ssh-${safe_host}-url-22" "ssh://git@${host}:22/"
+            done
 
-            printf '%s\n' "${REPO_SSH_PRIVATE_KEY}" | sed 's/^/    /' >> secrets/secret-ssh-url.yaml
-
-            cat > secrets/secret-ssh-url-port-22.yaml <<EOF_SSH_URL_22
-          apiVersion: v1
-          kind: Secret
-          metadata:
-            name: private-repo-ssh-url-port-22
-            namespace: argocd
-            labels:
-              argocd.argoproj.io/secret-type: repo-creds
-          stringData:
-            url: ssh://git@github.com:22/
-            sshPrivateKey: |
-          EOF_SSH_URL_22
-
-            printf '%s\n' "${REPO_SSH_PRIVATE_KEY}" | sed 's/^/    /' >> secrets/secret-ssh-url-port-22.yaml
-            echo "Added SSH repo-creds secrets for git@github.com:, ssh://git@github.com/ and ssh://git@github.com:22/ URLs"
+            echo "Added SSH repo-creds secrets for host(s): $(IFS=,; echo "${ssh_hosts[*]}")"
           fi
 
       - name: Generate Diff
