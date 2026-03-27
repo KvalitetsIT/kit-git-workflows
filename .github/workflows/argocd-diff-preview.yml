@@ -6,7 +6,8 @@ name: Argo CD Diff Preview (reusable)
 #
 # 1) Call this reusable workflow from a workflow triggered by pull_request
 # 2) Optional: override values_file_regex when not targeting prod
-# 4) Optionally provide secret repo_ssh_private_key for SSH-based child repos
+# 3) Optionally provide secret repo_read_token for private repos
+# 4) Optionally provide secret repo_ssh_private_key when child apps use SSH repo URLs
 #
 # What it does
 # - Checks out:
@@ -255,6 +256,12 @@ jobs:
             username: not-used
           EOF_SECRET
 
+          if [ -z "${REPO_SSH_PRIVATE_KEY}" ]; then
+            if grep -R -n -E --include='*.yaml' --include='*.yml' 'repoURL:[[:space:]]*(git@github\.com:|ssh://git@github\.com)' "${GITHUB_WORKSPACE}/main" "${GITHUB_WORKSPACE}/pull-request" >/dev/null 2>&1; then
+              echo "::warning::Found SSH-based repoURL entries, but no repo_ssh_private_key was provided. Rendering may fail with SSH_AUTH_SOCK errors."
+            fi
+          fi
+
           if [ -n "${REPO_SSH_PRIVATE_KEY}" ]; then
             cat > secrets/secret-ssh.yaml <<EOF_SSH
           apiVersion: v1
@@ -285,7 +292,22 @@ jobs:
           EOF_SSH_URL
 
             printf '%s\n' "${REPO_SSH_PRIVATE_KEY}" | sed 's/^/    /' >> secrets/secret-ssh-url.yaml
-            echo "Added SSH repo-creds secrets for git@github.com and ssh://git@github.com URLs"
+
+            cat > secrets/secret-ssh-url-port-22.yaml <<EOF_SSH_URL_22
+          apiVersion: v1
+          kind: Secret
+          metadata:
+            name: private-repo-ssh-url-port-22
+            namespace: argocd
+            labels:
+              argocd.argoproj.io/secret-type: repo-creds
+          stringData:
+            url: ssh://git@github.com:22/
+            sshPrivateKey: |
+          EOF_SSH_URL_22
+
+            printf '%s\n' "${REPO_SSH_PRIVATE_KEY}" | sed 's/^/    /' >> secrets/secret-ssh-url-port-22.yaml
+            echo "Added SSH repo-creds secrets for git@github.com:, ssh://git@github.com/ and ssh://git@github.com:22/ URLs"
           fi
 
       - name: Generate Diff
