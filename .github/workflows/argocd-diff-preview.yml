@@ -284,6 +284,7 @@ jobs:
             -e TARGET_BRANCH="${{ steps.meta.outputs.target_ref }}" \
             -e REPO="${{ steps.meta.outputs.repository }}" \
             dagandersen/argocd-diff-preview:v0.2.2 \
+            --render-method repo-server-api \
             --traverse-app-of-apps \
             --file-regex "${FILE_REGEX}"
 
