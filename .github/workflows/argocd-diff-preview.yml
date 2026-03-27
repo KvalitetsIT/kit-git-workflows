@@ -1,0 +1,183 @@
+name: Argo CD Diff Preview (reusable)
+# ------------------------------------------------------------------------------------
+# Argo CD diff preview for pull requests
+#
+# Get started (per repo)
+#
+# 1) Call this reusable workflow from a workflow triggered by pull_request
+# 2) Ensure the caller workflow grants:
+#      permissions:
+#        contents: read
+#        pull-requests: write
+# 3) Optional inputs:
+#      - base_ref (default: main)
+#      - pr_number (auto-detected from pull_request context when omitted)
+#      - image (default: dagandersen/argocd-diff-preview:v0.2.1)
+# 4) Optional secret:
+#      - repo_read_token (defaults to github.token)
+#
+# What it does
+# - Checks out:
+#     - base branch (base_ref) into ./main
+#     - pull request merge ref into ./pull-request
+# - Creates Argo CD repo-creds secret manifest in ./secrets for private repo access
+# - Runs dagandersen/argocd-diff-preview and writes markdown output to ./output/diff.md
+# - Creates or updates a PR comment with the diff markdown
+# ------------------------------------------------------------------------------------
+
+on:
+  workflow_call:
+    inputs:
+      base_ref:
+        description: "Base branch ref used for comparison"
+        required: false
+        type: string
+        default: "main"
+      pr_number:
+        description: "Pull request number (auto-detected on pull_request events)"
+        required: false
+        type: number
+      image:
+        description: "Container image used for generating diff"
+        required: false
+        type: string
+        default: "dagandersen/argocd-diff-preview:v0.2.1"
+    secrets:
+      repo_read_token:
+        description: "Optional token with read access to repo for private git/helm resources"
+        required: false
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Resolve pull request metadata
+        id: meta
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const inputPr = Number(`${{ inputs.pr_number }}`) || 0;
+            const payloadPr = Number(context.payload.pull_request?.number) || 0;
+            const prNumber = inputPr || payloadPr;
+
+            if (!prNumber) {
+              core.setFailed(
+                "No pull request number found. Run from a pull_request-triggered caller workflow or pass inputs.pr_number."
+              );
+              return;
+            }
+
+            const targetRef = `refs/pull/${prNumber}/merge`;
+            const repository = `${context.repo.owner}/${context.repo.repo}`;
+
+            core.setOutput("pr_number", String(prNumber));
+            core.setOutput("target_ref", targetRef);
+            core.setOutput("repository", repository);
+
+      - name: Checkout pull request merge ref
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.meta.outputs.target_ref }}
+          path: pull-request
+
+      - name: Checkout base branch
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.base_ref }}
+          path: main
+
+      - name: Prepare Argo CD repo credentials
+        env:
+          REPO_URL: https://github.com/${{ steps.meta.outputs.repository }}
+          REPO_TOKEN: ${{ secrets.repo_read_token || github.token }}
+        run: |
+          mkdir -p secrets
+
+          cat > secrets/secret.yaml <<EOF
+          apiVersion: v1
+          kind: Secret
+          metadata:
+            name: private-repo
+            namespace: argocd
+            labels:
+              argocd.argoproj.io/secret-type: repo-creds
+          stringData:
+            url: ${REPO_URL}
+            password: ${REPO_TOKEN}
+            username: not-used
+          EOF
+
+      - name: Generate Diff
+        run: |
+          mkdir -p output
+
+          docker run \
+            --network=host \
+            -v /var/run/docker.sock:/var/run/docker.sock \
+            -v "${{ github.workspace }}/main:/base-branch" \
+            -v "${{ github.workspace }}/pull-request:/target-branch" \
+            -v "${{ github.workspace }}/output:/output" \
+            -v "${{ github.workspace }}/secrets:/secrets" \
+            -e TARGET_BRANCH="${{ steps.meta.outputs.target_ref }}" \
+            -e REPO="${{ steps.meta.outputs.repository }}" \
+            "${{ inputs.image }}"
+
+      - name: Post diff as comment
+        uses: actions/github-script@v7
+        env:
+          PR_NUMBER: ${{ steps.meta.outputs.pr_number }}
+          DIFF_PATH: ${{ github.workspace }}/output/diff.md
+        with:
+          script: |
+            const fs = require("node:fs");
+
+            const marker = "<!-- argocd-diff-preview -->";
+            const issue_number = Number(process.env.PR_NUMBER);
+            const filePath = process.env.DIFF_PATH;
+
+            if (!fs.existsSync(filePath)) {
+              core.setFailed(`Diff file not found: ${filePath}`);
+              return;
+            }
+
+            const diffBody = fs.readFileSync(filePath, "utf8").trim();
+            if (!diffBody) {
+              core.setFailed("Diff file is empty.");
+              return;
+            }
+
+            const body = `${marker}\n${diffBody}`;
+            const { owner, repo } = context.repo;
+
+            const comments = await github.paginate(github.rest.issues.listComments, {
+              owner,
+              repo,
+              issue_number,
+              per_page: 100
+            });
+
+            const existing = [...comments]
+              .reverse()
+              .find((comment) => comment.user?.login === "github-actions[bot]" && comment.body?.includes(marker));
+
+            if (existing) {
+              await github.rest.issues.updateComment({
+                owner,
+                repo,
+                comment_id: existing.id,
+                body
+              });
+              core.info(`Updated comment ${existing.id}`);
+            } else {
+              const created = await github.rest.issues.createComment({
+                owner,
+                repo,
+                issue_number,
+                body
+              });
+              core.info(`Created comment ${created.data.id}`);
+            }
