@@ -148,6 +148,11 @@ jobs:
             local output_file="${output_dir}/rendered-applications.yaml"
             mkdir -p "${output_dir}"
 
+            if grep -qE '^[[:space:]]*dependencies:[[:space:]]*$' "${chart_dir}/Chart.yaml"; then
+              echo "Resolving Helm dependencies in ${chart_dir}"
+              helm dependency build "${chart_dir}" || helm dependency update "${chart_dir}"
+            fi
+
             local -a value_args
 
             if [ -f "${chart_dir}/values.yaml" ]; then
