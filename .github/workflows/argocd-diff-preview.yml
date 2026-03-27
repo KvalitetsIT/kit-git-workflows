@@ -5,17 +5,20 @@ name: Argo CD Diff Preview (reusable)
 # Simple usage (per repo)
 #
 # 1) Call this reusable workflow from a workflow triggered by pull_request
-# 2) Optionally provide app_path (folder with manifests or App-of-Apps Helm chart)
-# 3) Optionally provide secret repo_ssh_private_key for SSH-based child repos
+# 2) Optional: override values_file_regex when not targeting prod
+# 4) Optionally provide secret repo_ssh_private_key for SSH-based child repos
 #
 # What it does
 # - Checks out:
 #     - base branch from PR context into ./main
 #     - pull request merge ref into ./pull-request
 # - Auto-detects mode:
-#     - Helm App-of-Apps (Chart.yaml exists at app_path): tries to pre-render chart in both branches
-#     - Manifests folder: scans YAML files under app_path
-#     - If app_path is omitted and no clear chart is found: scans all YAML files
+#     - Helm App-of-Apps (Chart.yaml found): tries to pre-render chart in both branches
+#     - Manifests folder: scans YAML files under detected path
+#     - If no clear path is found: scans all YAML files
+# - Helm rendering automatically uses:
+#     - values.yaml + all values files matching values_file_regex
+#     - Default values_file_regex targets prod files
 # - Uses --traverse-app-of-apps to discover child applications at runtime
 # - Creates Argo CD repo-creds secret manifest in ./secrets for private repo access
 # - Runs dagandersen/argocd-diff-preview and writes markdown output to ./output/diff.md
@@ -25,11 +28,11 @@ name: Argo CD Diff Preview (reusable)
 on:
   workflow_call:
     inputs:
-      app_path:
-        description: "Optional path to app manifests folder or App-of-Apps Helm chart (e.g. deployment/apps/infrastructure). If omitted, workflow auto-detects."
+      values_file_regex:
+        description: "Regex used to include values files for Helm rendering (matches basename). Default selects prod files."
         required: false
         type: string
-        default: ""
+        default: "^values-.*prod.*\\.ya?ml$"
     secrets:
       repo_read_token:
         description: "Optional token with read access to repo for private git/helm resources"
@@ -83,13 +86,10 @@ jobs:
 
       - name: Resolve app mode and file filter
         id: app
-        env:
-          APP_PATH_INPUT: ${{ inputs.app_path }}
         run: |
           set -euo pipefail
 
-          APP_PATH="${APP_PATH_INPUT#/}"
-          APP_PATH="${APP_PATH%/}"
+          APP_PATH=""
 
           if [ -z "${APP_PATH}" ]; then
             # Try common App-of-Apps locations first
@@ -168,6 +168,7 @@ jobs:
         if: steps.app.outputs.mode == 'helm'
         env:
           APP_PATH: ${{ steps.app.outputs.app_path }}
+          VALUES_FILE_REGEX: ${{ inputs.values_file_regex }}
         run: |
           set -euo pipefail
 
@@ -181,10 +182,33 @@ jobs:
             echo "Resolving Helm dependencies in ${chart_dir}"
             helm dependency build "${chart_dir}" || helm dependency update "${chart_dir}"
 
-            local -a value_args
+            local base_values="${chart_dir}/values.yaml"
+            local -a matching_overrides=()
+            local values_regex="${VALUES_FILE_REGEX:-^values-.*prod.*\\.ya?ml$}"
 
-            if [ -f "${chart_dir}/values.yaml" ]; then
-              value_args+=("-f" "${chart_dir}/values.yaml")
+            mapfile -t matching_overrides < <(
+              find "${chart_dir}" -maxdepth 1 -type f \( -name 'values-*.yaml' -o -name 'values-*.yml' \) \
+                | while IFS= read -r file; do
+                    local_name="$(basename "${file}")"
+                    if printf '%s\n' "${local_name}" | grep -Eiq "${values_regex}"; then
+                      printf '%s\n' "${file}"
+                    fi
+                  done \
+                | sort
+            )
+
+            local -a value_args=()
+            if [ -f "${base_values}" ]; then
+              value_args+=("-f" "${base_values}")
+            fi
+            for override in "${matching_overrides[@]}"; do
+              value_args+=("-f" "${override}")
+            done
+
+            if [ "${#matching_overrides[@]}" -eq 0 ]; then
+              echo "No values files matched regex '${values_regex}' in ${chart_dir}. Rendering with values.yaml only."
+            else
+              echo "Using values regex '${values_regex}' with ${#matching_overrides[@]} matching file(s)."
             fi
 
             echo "Rendering ${chart_dir} -> ${output_file}"
