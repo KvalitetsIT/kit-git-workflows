@@ -5,16 +5,18 @@ name: Argo CD Diff Preview (reusable)
 # Simple usage (per repo)
 #
 # 1) Call this reusable workflow from a workflow triggered by pull_request
-# 2) Provide app_path (folder with manifests or App-of-Apps Helm chart)
-# 3) Optionally provide env_value_file (e.g. values-prod.yaml)
+# 2) Optionally provide app_path (folder with manifests or App-of-Apps Helm chart)
+# 3) Optionally provide secret repo_ssh_private_key for SSH-based child repos
 #
 # What it does
 # - Checks out:
-#     - base branch (base_ref) into ./main
+#     - base branch from PR context into ./main
 #     - pull request merge ref into ./pull-request
 # - Auto-detects mode:
-#     - Helm App-of-Apps (Chart.yaml exists at app_path): renders chart in both branches
+#     - Helm App-of-Apps (Chart.yaml exists at app_path): tries to pre-render chart in both branches
 #     - Manifests folder: scans YAML files under app_path
+#     - If app_path is omitted and no clear chart is found: scans all YAML files
+# - Uses --traverse-app-of-apps to discover child applications at runtime
 # - Creates Argo CD repo-creds secret manifest in ./secrets for private repo access
 # - Runs dagandersen/argocd-diff-preview and writes markdown output to ./output/diff.md
 # - Creates or updates a PR comment with the diff markdown
@@ -24,22 +26,16 @@ on:
   workflow_call:
     inputs:
       app_path:
-        description: "Path to app manifests folder or App-of-Apps Helm chart (e.g. deployment/apps/infrastructure)"
-        required: true
-        type: string
-      env_value_file:
-        description: "Optional extra Helm values file (e.g. values-prod.yaml)"
+        description: "Optional path to app manifests folder or App-of-Apps Helm chart (e.g. deployment/apps/infrastructure). If omitted, workflow auto-detects."
         required: false
         type: string
         default: ""
-      base_ref:
-        description: "Base branch ref used for comparison"
-        required: false
-        type: string
-        default: "main"
     secrets:
       repo_read_token:
         description: "Optional token with read access to repo for private git/helm resources"
+        required: false
+      repo_ssh_private_key:
+        description: "Optional SSH private key for repositories referenced with SSH URLs (e.g. git@github.com:org/repo.git)"
         required: false
 
 permissions:
@@ -66,10 +62,12 @@ jobs:
 
             const targetRef = `refs/pull/${prNumber}/merge`;
             const repository = `${context.repo.owner}/${context.repo.repo}`;
+            const baseRef = context.payload.pull_request?.base?.ref || "main";
 
             core.setOutput("pr_number", String(prNumber));
             core.setOutput("target_ref", targetRef);
             core.setOutput("repository", repository);
+            core.setOutput("base_ref", baseRef);
 
       - name: Checkout pull request merge ref
         uses: actions/checkout@v4
@@ -80,7 +78,7 @@ jobs:
       - name: Checkout base branch
         uses: actions/checkout@v4
         with:
-          ref: ${{ inputs.base_ref }}
+          ref: ${{ steps.meta.outputs.base_ref }}
           path: main
 
       - name: Resolve app mode and file filter
@@ -94,8 +92,41 @@ jobs:
           APP_PATH="${APP_PATH%/}"
 
           if [ -z "${APP_PATH}" ]; then
-            echo "Input app_path must not be empty"
-            exit 1
+            # Try common App-of-Apps locations first
+            for candidate in "deployment/apps/infrastructure" "apps/infrastructure" "argocd"; do
+              if [ -d "${GITHUB_WORKSPACE}/main/${candidate}" ] && [ -d "${GITHUB_WORKSPACE}/pull-request/${candidate}" ]; then
+                APP_PATH="${candidate}"
+                echo "Auto-detected app_path=${APP_PATH} from common locations"
+                break
+              fi
+            done
+          fi
+
+          if [ -z "${APP_PATH}" ]; then
+            # Try auto-detecting a single Helm chart path
+            mapfile -t chart_candidates < <(
+              find "${GITHUB_WORKSPACE}/main" -type f -name Chart.yaml \
+                | sed "s#^${GITHUB_WORKSPACE}/main/##" \
+                | sed 's#/Chart.yaml$##' \
+                | while IFS= read -r rel; do
+                    if [ -f "${GITHUB_WORKSPACE}/pull-request/${rel}/Chart.yaml" ]; then
+                      printf '%s\n' "${rel}"
+                    fi
+                  done \
+                | sort
+            )
+
+            if [ "${#chart_candidates[@]}" -eq 1 ]; then
+              APP_PATH="${chart_candidates[0]}"
+              echo "Auto-detected unique Helm chart app_path=${APP_PATH}"
+            fi
+          fi
+
+          if [ -z "${APP_PATH}" ]; then
+            echo "No app_path provided and no unique chart path auto-detected. Falling back to scanning all YAML files."
+            echo "mode=auto" >> "$GITHUB_OUTPUT"
+            echo "path_file_regex=^.*\\.ya?ml$" >> "$GITHUB_OUTPUT"
+            exit 0
           fi
 
           MAIN_PATH="${GITHUB_WORKSPACE}/main/${APP_PATH}"
@@ -112,10 +143,11 @@ jobs:
           fi
 
           echo "app_path=${APP_PATH}" >> "$GITHUB_OUTPUT"
+          ESCAPED_APP_PATH="$(printf '%s' "${APP_PATH}" | sed -e 's/[][(){}.^$*+?|\\]/\\&/g')"
+          echo "path_file_regex=^${ESCAPED_APP_PATH}/.*\\.ya?ml$" >> "$GITHUB_OUTPUT"
 
           if [ -f "${MAIN_PATH}/Chart.yaml" ] && [ -f "${PR_PATH}/Chart.yaml" ]; then
             echo "mode=helm" >> "$GITHUB_OUTPUT"
-            echo "file_regex=^\\.argocd-diff-preview/rendered-applications\\.yaml$" >> "$GITHUB_OUTPUT"
             echo "Detected App-of-Apps Helm chart at ${APP_PATH}"
           else
             if [ ! -d "${MAIN_PATH}" ] || [ ! -d "${PR_PATH}" ]; then
@@ -123,9 +155,7 @@ jobs:
               exit 1
             fi
 
-            ESCAPED_APP_PATH="$(printf '%s' "${APP_PATH}" | sed -e 's/[][(){}.^$*+?|\\]/\\&/g')"
             echo "mode=manifests" >> "$GITHUB_OUTPUT"
-            echo "file_regex=^${ESCAPED_APP_PATH}/.*\\.ya?ml$" >> "$GITHUB_OUTPUT"
             echo "Detected manifest folder mode under ${APP_PATH}"
           fi
 
@@ -133,11 +163,11 @@ jobs:
         if: steps.app.outputs.mode == 'helm'
         uses: azure/setup-helm@v4
 
-      - name: Render App-of-Apps Helm chart
+      - name: Render App-of-Apps Helm chart (best effort)
+        id: render_helm
         if: steps.app.outputs.mode == 'helm'
         env:
           APP_PATH: ${{ steps.app.outputs.app_path }}
-          ENV_VALUE_FILE: ${{ inputs.env_value_file }}
         run: |
           set -euo pipefail
 
@@ -148,10 +178,8 @@ jobs:
             local output_file="${output_dir}/rendered-applications.yaml"
             mkdir -p "${output_dir}"
 
-            if grep -qE '^[[:space:]]*dependencies:[[:space:]]*$' "${chart_dir}/Chart.yaml"; then
-              echo "Resolving Helm dependencies in ${chart_dir}"
-              helm dependency build "${chart_dir}" || helm dependency update "${chart_dir}"
-            fi
+            echo "Resolving Helm dependencies in ${chart_dir}"
+            helm dependency build "${chart_dir}" || helm dependency update "${chart_dir}"
 
             local -a value_args
 
@@ -159,32 +187,33 @@ jobs:
               value_args+=("-f" "${chart_dir}/values.yaml")
             fi
 
-            if [ -n "${ENV_VALUE_FILE}" ]; then
-              local env_file="${ENV_VALUE_FILE#/}"
-              local chart_env_values="${chart_dir}/${env_file}"
-              local root_env_values="${branch_dir}/${env_file}"
-
-              if [ -f "${chart_env_values}" ]; then
-                value_args+=("-f" "${chart_env_values}")
-              elif [ -f "${root_env_values}" ]; then
-                value_args+=("-f" "${root_env_values}")
-              else
-                echo "Missing env_value_file in chart path or repo root: ${ENV_VALUE_FILE}"
-                exit 1
-              fi
-            fi
-
             echo "Rendering ${chart_dir} -> ${output_file}"
-            helm template "argocd-diff-preview" "${chart_dir}" "${value_args[@]}" > "${output_file}"
+            helm template \
+              "argocd-diff-preview" \
+              "${chart_dir}" \
+              --dependency-update \
+              "${value_args[@]}" \
+              > "${output_file}"
           }
 
-          render_branch "${GITHUB_WORKSPACE}/main"
-          render_branch "${GITHUB_WORKSPACE}/pull-request"
+          main_status=0
+          pr_status=0
+
+          render_branch "${GITHUB_WORKSPACE}/main" || main_status=$?
+          render_branch "${GITHUB_WORKSPACE}/pull-request" || pr_status=$?
+
+          if [ "${main_status}" -eq 0 ] && [ "${pr_status}" -eq 0 ]; then
+            echo "rendered=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "Helm pre-render failed in at least one branch. Falling back to repository scan + --traverse-app-of-apps."
+            echo "rendered=false" >> "$GITHUB_OUTPUT"
+          fi
 
       - name: Prepare Argo CD repo credentials
         env:
           REPO_URL: https://github.com/${{ steps.meta.outputs.repository }}
           REPO_TOKEN: ${{ secrets.repo_read_token || github.token }}
+          REPO_SSH_PRIVATE_KEY: ${{ secrets.repo_ssh_private_key }}
         run: |
           mkdir -p secrets
 
@@ -202,9 +231,47 @@ jobs:
             username: not-used
           EOF_SECRET
 
+          if [ -n "${REPO_SSH_PRIVATE_KEY}" ]; then
+            cat > secrets/secret-ssh.yaml <<EOF_SSH
+          apiVersion: v1
+          kind: Secret
+          metadata:
+            name: private-repo-ssh
+            namespace: argocd
+            labels:
+              argocd.argoproj.io/secret-type: repo-creds
+          stringData:
+            url: git@github.com:
+            sshPrivateKey: |
+          EOF_SSH
+
+            printf '%s\n' "${REPO_SSH_PRIVATE_KEY}" | sed 's/^/    /' >> secrets/secret-ssh.yaml
+
+            cat > secrets/secret-ssh-url.yaml <<EOF_SSH_URL
+          apiVersion: v1
+          kind: Secret
+          metadata:
+            name: private-repo-ssh-url
+            namespace: argocd
+            labels:
+              argocd.argoproj.io/secret-type: repo-creds
+          stringData:
+            url: ssh://git@github.com/
+            sshPrivateKey: |
+          EOF_SSH_URL
+
+            printf '%s\n' "${REPO_SSH_PRIVATE_KEY}" | sed 's/^/    /' >> secrets/secret-ssh-url.yaml
+            echo "Added SSH repo-creds secrets for git@github.com and ssh://git@github.com URLs"
+          fi
+
       - name: Generate Diff
         run: |
           mkdir -p output
+
+          FILE_REGEX="${{ steps.app.outputs.path_file_regex }}"
+          if [ "${{ steps.app.outputs.mode }}" = "helm" ] && [ "${{ steps.render_helm.outputs.rendered }}" = "true" ]; then
+            FILE_REGEX="^\\.argocd-diff-preview/rendered-applications\\.yaml$"
+          fi
 
           docker run \
             --network=host \
@@ -213,11 +280,12 @@ jobs:
             -v "${{ github.workspace }}/pull-request:/target-branch" \
             -v "${{ github.workspace }}/output:/output" \
             -v "${{ github.workspace }}/secrets:/secrets" \
-            -e BASE_BRANCH="${{ inputs.base_ref }}" \
+            -e BASE_BRANCH="${{ steps.meta.outputs.base_ref }}" \
             -e TARGET_BRANCH="${{ steps.meta.outputs.target_ref }}" \
             -e REPO="${{ steps.meta.outputs.repository }}" \
-            dagandersen/argocd-diff-preview:v0.2.1 \
-            --file-regex "${{ steps.app.outputs.file_regex }}"
+            dagandersen/argocd-diff-preview:v0.2.2 \
+            --traverse-app-of-apps \
+            --file-regex "${FILE_REGEX}"
 
       - name: Post diff as comment
         uses: actions/github-script@v7
