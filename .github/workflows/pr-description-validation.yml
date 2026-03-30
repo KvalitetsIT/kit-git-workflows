@@ -1,26 +1,43 @@
 name: PR Body Validation (Reusable)
-# Validates PR description quality gates:
-# - Required text blocks: If <!-- required-text-start -->...<!-- required-text-end --> blocks exist, each must be non-empty
-#   - If no blocks exist, the check passes
-#   - Fails on unbalanced tags (start without end or end without start)
-# - Checklist: Fails if the PR checklist contains any unchecked tasks (via task-completed-checker)
-
 
 on:
   workflow_call:
     inputs:
+      required_text_enabled:
+        description: "Enable the required-text block check"
+        type: boolean
+        required: false
+        default: true
       start_tag:
+        description: "Opening tag for required-text blocks"
         type: string
         required: false
         default: "<!-- required-text-start -->"
       end_tag:
+        description: "Closing tag for required-text blocks"
         type: string
         required: false
         default: "<!-- required-text-end -->"
       min_length:
+        description: "Minimum non-whitespace character count inside a required-text block"
         type: number
         required: false
         default: 10
+      checklist_enabled:
+        description: "Enable the checklist (task list) check"
+        type: boolean
+        required: false
+        default: true
+      ignore_start_tag:
+        description: "Opening tag for checklist ignore regions"
+        type: string
+        required: false
+        default: "<!-- ignore-task-list-start -->"
+      ignore_end_tag:
+        description: "Closing tag for checklist ignore regions"
+        type: string
+        required: false
+        default: "<!-- ignore-task-list-end -->"
 
 permissions:
   pull-requests: read # Required to read pull request body for validation
@@ -29,49 +46,82 @@ jobs:
   required-text-check:
     name: Required Text Validation
     runs-on: ubuntu-latest
+    if: ${{ inputs.required_text_enabled }}
     concurrency:
       group: ${{ github.workflow }}-required-text-${{ github.event.pull_request.number }}
       cancel-in-progress: true
     steps:
       - name: Fail if required-text region is empty
-        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8.0.0
         env:
+          PR_BODY: ${{ github.event.pull_request.body }}
           START_TAG: ${{ inputs.start_tag }}
           END_TAG: ${{ inputs.end_tag }}
           MIN_LENGTH: ${{ inputs.min_length }}
-        with:
-          script: |
-            const body = context.payload.pull_request?.body || "";
-            const startTag = process.env.START_TAG;
-            const endTag   = process.env.END_TAG;
-            const minLen   = Math.max(1, Number(process.env.MIN_LENGTH) || 1);
+        run: |
+          has_start=false
+          has_end=false
+          [[ "$PR_BODY" == *"$START_TAG"* ]] && has_start=true
+          [[ "$PR_BODY" == *"$END_TAG"* ]] && has_end=true
 
-            const esc = s => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+          # If no tags are present at all, the check is a no-op
+          if ! $has_start && ! $has_end; then
+            echo "No required-text tags found - skipping."
+            exit 0
+          fi
 
-            if (body.includes(startTag) && !body.includes(endTag))
-              return core.setFailed("Found required-text-start but no required-text-end.");
-            if (body.includes(endTag) && !body.includes(startTag))
-              return core.setFailed("Found required-text-end but no required-text-start.");
+          # Missing end or start tags are always an error
+          if $has_start && ! $has_end; then
+            echo "::error::Found required-text-start but no required-text-end."
+            exit 1
+          fi
+          if $has_end && ! $has_start; then
+            echo "::error::Found required-text-end but no required-text-start."
+            exit 1
+          fi
 
-            const re = new RegExp(`${esc(startTag)}([\\s\\S]*?)${esc(endTag)}`, "g");
-            const matches = [...body.matchAll(re)];
-            if (matches.length === 0) return;
+          bad=0
+          remaining="$PR_BODY"
+          # Traverse each start -> end pair
+          while [[ "$remaining" == *"$START_TAG"* ]]; do
+            remaining="${remaining#*"$START_TAG"}"
+            content="${remaining%%"$END_TAG"*}"
+            trimmed="${content//[[:space:]]/}"
 
-            const bad = matches.filter(m => ((m[1] || "").replace(/\s+/g, "")).length < minLen).length;
-            if (bad) core.setFailed(`${bad} required-text block(s) are empty. Fill in text between the tags.`);
+            # Check if block content meets the minimum length
+            [[ "${#trimmed}" -lt "$MIN_LENGTH" ]] && bad=$((bad + 1))
+            remaining="${remaining#*"$END_TAG"}"
+          done
+
+          if [[ "$bad" -gt 0 ]]; then
+            echo "::error::${bad} required-text block(s) are empty. Fill in text between the tags."
+            exit 1
+          fi
 
   checklist-check:
     name: Checklist Validation
     runs-on: ubuntu-latest
+    if: ${{ inputs.checklist_enabled }}
     concurrency:
       group: ${{ github.workflow }}-checklist-${{ github.event.pull_request.number }}
       cancel-in-progress: true
     steps:
       - name: Fail if checklist has unchecked items
-        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8.0.0
-        with:
-          script: |
-            const body = context.payload.pull_request?.body || "";
-            const cleaned = body.replace(/<!-- ignore-task-list-start -->[\s\S]*?<!-- ignore-task-list-end -->/g, "");
-            const unchecked = (cleaned.match(/^\s*-\s*\[\s*\]\s+/gm) || []).length;
-            if (unchecked) core.setFailed(`${unchecked} unchecked checklist item(s) found in PR description.`);
+        env:
+          PR_BODY: ${{ github.event.pull_request.body }}
+          IGNORE_START_TAG: ${{ inputs.ignore_start_tag }}
+          IGNORE_END_TAG: ${{ inputs.ignore_end_tag }}
+        run: |
+          # Strip ignored regions before counting unchecked items
+          cleaned="$PR_BODY"
+          while [[ "$cleaned" == *"$IGNORE_START_TAG"* ]]; do
+            before="${cleaned%%"$IGNORE_START_TAG"*}"
+            after="${cleaned#*"$IGNORE_END_TAG"}"
+            cleaned="${before}${after}"
+          done
+
+          unchecked=$(echo "$cleaned" | grep -cE '^\s*-\s*\[\s*\]\s+' || true)
+
+          if [[ "$unchecked" -gt 0 ]]; then
+            echo "::error::${unchecked} unchecked checklist item(s) found in PR description."
+            exit 1
+          fi
