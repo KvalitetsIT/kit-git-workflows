@@ -1,0 +1,213 @@
+name: GitHub Actions Security Analysis
+
+on:
+  workflow_call:
+    inputs:
+      min-severity:
+        description: "Only show results at or above this severity [possible values: unknown, informational, low, medium, high]"
+        required: false
+        type: string
+        default: "low"
+      min-confidence:
+        description: "Only show results at or above this confidence level [possible values: unknown, low, medium, high]"
+        required: false
+        type: string
+        default: "low"
+      zizmor-version:
+        description: "Version of zizmor to install"
+        type: string
+        default: "latest"
+        required: false
+      zizmor-args:
+        description: "Additional arguments to pass to zizmor"
+        type: string
+        default: ""
+        required: false
+      always-use-default-config:
+        description: "Always use the shared default config, even if the caller repo has its own"
+        type: boolean
+        default: false
+        required: false
+    secrets:
+      token:
+        description: "GitHub token for zizmor to use for API calls (defaults to GITHUB_TOKEN)"
+        required: false
+
+# Ensure that default `GITHUB_TOKEN` doesn't have any permissions.
+permissions: {}
+
+jobs:
+  # Resolve which ref of shared-workflows was called so we can fetch the
+  # default zizmor config from the same version. Uses the OIDC token's
+  # job_workflow_ref claim. Runs in a separate job to keep id-token: write
+  # scoped away from the main analysis job.
+  resolve-workflow-ref:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    outputs:
+      owner: ${{ steps.resolve.outputs.owner }}
+      repo: ${{ steps.resolve.outputs.repo }}
+      sha: ${{ steps.resolve.outputs.sha }}
+    steps:
+      - name: resolve workflow ref via OIDC
+        id: resolve
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+
+          FALLBACK_OWNER="KvalitetsIT"
+          FALLBACK_REPO="kit-git-workflows"
+          FALLBACK_SHA="main"
+
+          fallback() {
+            echo "::warning::$1 Using fallback."
+            echo "owner=${FALLBACK_OWNER}" >> "$GITHUB_OUTPUT"
+            echo "repo=${FALLBACK_REPO}" >> "$GITHUB_OUTPUT"
+            echo "sha=${FALLBACK_SHA}" >> "$GITHUB_OUTPUT"
+            exit 0
+          }
+
+          if [ -z "${ACTIONS_ID_TOKEN_REQUEST_URL:-}" ] || [ -z "${ACTIONS_ID_TOKEN_REQUEST_TOKEN:-}" ]; then
+            fallback "No OIDC token available (e.g. fork PR)."
+          fi
+
+          # Request OIDC token
+          OIDC_TOKEN=$(curl -sS -H "Authorization: bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" \
+            "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=zizmor-workflow-ref" | jq -r '.value')
+
+          if [ -z "$OIDC_TOKEN" ] || [ "$OIDC_TOKEN" = "null" ]; then
+            fallback "Failed to retrieve OIDC token."
+          fi
+
+          # Decode JWT payload (second segment, base64url → base64 with padding)
+          B64=$(echo "$OIDC_TOKEN" | cut -d. -f2 | tr '_-' '/+')
+          PAD=$(( 4 - ${#B64} % 4 ))
+          [ "$PAD" -lt 4 ] && B64="${B64}$(printf '=%.0s' $(seq 1 "$PAD"))"
+          PAYLOAD=$(echo "$B64" | base64 -d)
+
+          JOB_REF=$(echo "$PAYLOAD" | jq -r '.job_workflow_ref // empty')
+          if [ -z "$JOB_REF" ]; then
+            fallback "job_workflow_ref claim not found."
+          fi
+
+          # Parse: owner/repo/.github/workflows/file.yml@ref
+          OWNER=$(echo "$JOB_REF" | cut -d/ -f1)
+          REPO=$(echo "$JOB_REF" | cut -d/ -f2)
+          GIT_REF=$(echo "$JOB_REF" | sed 's/.*@//')
+
+          # Resolve ref to SHA for cache stability
+          SHA="$GIT_REF"
+          if echo "$GIT_REF" | grep -q '^refs/'; then
+            REF_PATH="${GIT_REF#refs/}"
+            SHA=$(gh api "repos/${OWNER}/${REPO}/git/ref/${REF_PATH}" -q '.object.sha')
+          fi
+
+          echo "Resolved: ${OWNER}/${REPO}@${SHA}"
+          echo "owner=${OWNER}" >> "$GITHUB_OUTPUT"
+          echo "repo=${REPO}" >> "$GITHUB_OUTPUT"
+          echo "sha=${SHA}" >> "$GITHUB_OUTPUT"
+
+  zizmor:
+    name: zizmor
+    needs: resolve-workflow-ref
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      security-events: write
+      contents: read
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+          fetch-depth: 1
+
+      - name: restore config from cache
+        id: cache-config
+        uses: actions/cache@668228422ae6a00e4ad889ee87cd7109ec5666a7 # v5.0.4
+        with:
+          path: ${{ runner.temp }}/zizmor.yml
+          key: zizmor-config-${{ needs.resolve-workflow-ref.outputs.owner }}-${{ needs.resolve-workflow-ref.outputs.repo }}-${{ needs.resolve-workflow-ref.outputs.sha }}
+
+      - name: fetch default config
+        if: steps.cache-config.outputs.cache-hit != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CONFIG_OWNER: ${{ needs.resolve-workflow-ref.outputs.owner }}
+          CONFIG_REPO: ${{ needs.resolve-workflow-ref.outputs.repo }}
+          CONFIG_SHA: ${{ needs.resolve-workflow-ref.outputs.sha }}
+        run: |
+          set -euo pipefail
+
+          RESPONSE=$(gh api "repos/${CONFIG_OWNER}/${CONFIG_REPO}/contents/.github/zizmor.yml?ref=${CONFIG_SHA}" 2>/dev/null) || {
+            echo "::warning::No default zizmor config found in ${CONFIG_OWNER}/${CONFIG_REPO}@${CONFIG_SHA}."
+            exit 0
+          }
+
+          echo "$RESPONSE" | jq -r '.content' | base64 -d > "${{ runner.temp }}/zizmor.yml"
+          echo "Default config fetched from ${CONFIG_OWNER}/${CONFIG_REPO}@${CONFIG_SHA}"
+
+      - name: resolve config
+        id: config
+        env:
+          FORCE_DEFAULT: ${{ inputs.always-use-default-config && 'true' || '' }}
+        run: |
+          if [ -z "$FORCE_DEFAULT" ]; then
+            if [ -f ".github/zizmor.yml" ]; then
+              echo "Using caller's .github/zizmor.yml"
+              echo "path=.github/zizmor.yml" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            if [ -f "zizmor.yml" ]; then
+              echo "Using caller's zizmor.yml"
+              echo "path=zizmor.yml" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+          fi
+
+          CONFIG_PATH="${{ runner.temp }}/zizmor.yml"
+          if [ -f "$CONFIG_PATH" ]; then
+            echo "Using shared default config"
+            echo "path=${CONFIG_PATH}" >> "$GITHUB_OUTPUT"
+          else
+            echo "No config found, using zizmor defaults"
+          fi
+
+      - name: install uv
+        uses: astral-sh/setup-uv@cec208311dfd045dd5311c1add060b2062131d57 # v8.0.0
+        with:
+          enable-cache: false
+          cache-dependency-glob: ""
+          version: 0.11.6
+
+      - name: run zizmor
+        env:
+          GH_TOKEN: ${{ secrets.token || github.token }}
+          ZIZMOR_ARGS: ${{ inputs.zizmor-args }}
+          ZIZMOR_VERSION: ${{ inputs.zizmor-version }}
+          ZIZMOR_CONFIG_PATH: ${{ steps.config.outputs.path }}
+          MIN_SEVERITY: ${{ inputs.min-severity }}
+          MIN_CONFIDENCE: ${{ inputs.min-confidence }}
+        run: |
+          uvx zizmor@"$ZIZMOR_VERSION" \
+            --format sarif \
+            --min-severity "${MIN_SEVERITY}" \
+            --min-confidence "${MIN_CONFIDENCE}" \
+            ${ZIZMOR_CONFIG_PATH:+--config "$ZIZMOR_CONFIG_PATH"} \
+            ${RUNNER_DEBUG:+"--verbose"} \
+            ${ZIZMOR_ARGS:+${ZIZMOR_ARGS}} \
+            . \
+            > results.sarif
+          exit_code=$?
+          # Only fail on exit code 1 (zizmor crash). 0 = no findings, 10-14 = findings by severity.
+          if [ "${exit_code}" -eq 1 ]; then exit 1; fi
+          exit 0
+
+      - name: upload sarif file
+        uses: github/codeql-action/upload-sarif@c10b8064de6f491fea524254123dbe5e09572f13 # v4.35.1
+        continue-on-error: true
+        with:
+          sarif_file: results.sarif
+          category: zizmor
