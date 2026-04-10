@@ -1,0 +1,3 @@
+# We can define Zizmor Rules which should be default for all workflows here.
+# https://docs.zizmor.sh/
+rules: {}

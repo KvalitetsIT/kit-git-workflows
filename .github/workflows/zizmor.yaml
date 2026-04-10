@@ -1,0 +1,26 @@
+name: CI Security Analysis with Zizmor
+
+on:
+  push:
+    paths:
+      - ".github/**"
+  pull_request:
+    paths:
+      - ".github/**"
+
+permissions:
+  contents: read
+
+jobs:
+  zizmor:
+    name: Run zizmor
+    permissions:
+      actions: read
+      contents: read
+      id-token: write
+      security-events: write
+    uses: ./.github/workflows/reusable-zizmor.yaml
+    with:
+      min-severity: high
+      min-confidence: low
+      zizmor-args: --offline
