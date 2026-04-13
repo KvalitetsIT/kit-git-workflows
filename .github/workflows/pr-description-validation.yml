@@ -44,7 +44,7 @@ permissions:
 
 jobs:
   required-text-check:
-    name: Required Text Validation
+    name: required-text-check
     runs-on: ubuntu-slim
     if: ${{ inputs.required_text_enabled }}
     concurrency:
@@ -79,7 +79,7 @@ jobs:
             if (bad) core.setFailed(`${bad} required-text block(s) are empty. Fill in text between the tags.`);
 
   checklist-check:
-    name: Checklist Validation
+    name: checklist-check
     runs-on: ubuntu-slim
     if: ${{ inputs.checklist_enabled }}
     concurrency:
