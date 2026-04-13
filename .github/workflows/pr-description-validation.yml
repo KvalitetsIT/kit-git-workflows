@@ -7,7 +7,8 @@ name: PR Body Validation (Reusable)
 
 
 on:
-  workflow_call
+  workflow_call:
+    inputs: {}
 
 permissions:
   pull-requests: read # Required to read pull request body for validation
