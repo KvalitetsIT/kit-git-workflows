@@ -4,10 +4,14 @@ This repository contains **reusable GitHub Actions workflows** that are meant to
 
 ## Available Workflows
 
-| Workflow                                                                                                                                                           | Description                                                                                                            |
-| :----------------------------------------------------------------------------------------------------------------------------------------------------------------- | :--------------------------------------------------------------------------------------------------------------------- |
-| [notify-slack-prs-merged-to-main-missing-production-release-labels.yaml](.github/workflows/notify-slack-prs-merged-to-main-missing-production-release-labels.yaml) | Sends a Slack notification listing merged PRs that are missing the "production release tested" or "no impact" labels.  |
-| [pr-description-validation.yml](.github/workflows/pr-description-validation.yml)                                                                                   | Validates PR description quality gates: checks for required text blocks and ensures all checklist items are completed. |
+| Workflow | Description | Docs |
+| :------- | :---------- | :--- |
+| [helm-pr.yaml](.github/workflows/helm-pr.yaml) | Lints and tests Helm charts using chart-testing and a KinD cluster. | [Docs](.github/workflows/helm-pr.md) |
+| [pr-description-validation.yml](.github/workflows/pr-description-validation.yml) | Validates PR descriptions: required text blocks and checklist completion. | [Docs](.github/workflows/pr-description-validation.md) |
+| [notify-slack-prs-merged-to-main-missing-production-release-labels.yaml](.github/workflows/notify-slack-prs-merged-to-main-missing-production-release-labels.yaml) | Sends a Slack reminder for merged PRs missing production release labels. | [Docs](.github/workflows/notify-slack-prs-merged-to-main-missing-production-release-labels.md) |
+| [reusable-zizmor.yaml](.github/workflows/reusable-zizmor.yaml) | Runs zizmor security analysis on GitHub Actions files and uploads SARIF results. | [Docs](.github/workflows/reusable-zizmor.md) |
+
+Each workflow has its own documentation with detailed inputs, examples, and setup instructions.
 
 ---
 
@@ -29,7 +33,7 @@ on:
 
 jobs:
   remind:
-    uses: KvalitetsIT/kit-git-workflows/.github/workflows/notify-slack-prs-merged-to-main-missing-production-release-labels/notify-slack-prs-merged-to-main-missing-production-release-labels.yaml@main
+    uses: KvalitetsIT/kit-git-workflows/.github/workflows/notify-slack-prs-merged-to-main-missing-production-release-labels.yaml@main
     secrets:
       SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL_KIT_HOSTING_GITHUB }}
     with:
@@ -39,5 +43,3 @@ jobs:
       label_tested: "production release tested"
       label_no_impact: "production release no impact"
 ```
-
-Each workflow has its own README.md file with more details regarding variables and so on.
