@@ -62,16 +62,20 @@ on:
         required: true
 
 permissions:
-  contents: read
-  pull-requests: read
+  contents: read # Required to access repository metadata
+  pull-requests: read # Required to search and read pull request data
 
 jobs:
   notify:
-    runs-on: ubuntu-latest
+    name: Notify Slack
+    runs-on: ubuntu-slim
+    concurrency:
+      group: ${{ github.workflow }}-${{ github.ref }}
+      cancel-in-progress: false
     steps:
       - name: Find merged PRs missing production release labels
         id: find
-        uses: actions/github-script@v7
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
         env:
           TARGET_BRANCH: ${{ inputs.target_branch }}
           CREATED_AFTER: ${{ inputs.created_after }}
@@ -160,7 +164,14 @@ jobs:
       - name: Build Slack payload (valid JSON)
         id: slack
         if: steps.find.outputs.count != '0'
-        uses: actions/github-script@v7
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        env:
+          PRS_JSON: ${{ steps.find.outputs.prs_json }}
+          TARGET_BRANCH: ${{ steps.find.outputs.target_branch }}
+          CREATED_AFTER: ${{ steps.find.outputs.created_after }}
+          MERGED_DAYS_AGO: ${{ steps.find.outputs.merged_days_ago }}
+          LABEL_TESTED: ${{ steps.find.outputs.label_tested }}
+          LABEL_NO_IMPACT: ${{ steps.find.outputs.label_no_impact }}
         with:
           script: |
             // >>> GitHub username -> Slack user ID map (edit this)
@@ -181,13 +192,13 @@ jobs:
             };
             // <<<
 
-            const prs = JSON.parse(`${{ steps.find.outputs.prs_json }}`);
+            const prs = JSON.parse(process.env.PRS_JSON);
 
-            const targetBranch = `${{ steps.find.outputs.target_branch }}`;
-            const createdAfter = `${{ steps.find.outputs.created_after }}`;
-            const mergedDaysAgo = `${{ steps.find.outputs.merged_days_ago }}`;
-            const labelTested = `${{ steps.find.outputs.label_tested }}`;
-            const labelNoImpact = `${{ steps.find.outputs.label_no_impact }}`;
+            const targetBranch = process.env.TARGET_BRANCH;
+            const createdAfter = process.env.CREATED_AFTER;
+            const mergedDaysAgo = process.env.MERGED_DAYS_AGO;
+            const labelTested = process.env.LABEL_TESTED;
+            const labelNoImpact = process.env.LABEL_NO_IMPACT;
 
             function mentionFor(githubLogin) {
               const slackId = GH_TO_SLACK[githubLogin];
@@ -215,8 +226,9 @@ jobs:
 
       - name: Send to Slack (webhook)
         if: steps.find.outputs.count != '0'
-        uses: slackapi/slack-github-action@v1.27.0
+        uses: slackapi/slack-github-action@af78098f536edbc4de71162a307590698245be95 # v3.0.1
         with:
           payload: ${{ steps.slack.outputs.payload }}
+          webhook-type: incoming-webhook
         env:
           SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}

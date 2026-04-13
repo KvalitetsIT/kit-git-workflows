@@ -9,36 +9,37 @@ name: PR Body Validation (Reusable)
 on:
   workflow_call:
     inputs:
-      start_tag:
-        type: string
-        required: false
-        default: "<!-- required-text-start -->"
-      end_tag:
-        type: string
-        required: false
-        default: "<!-- required-text-end -->"
       min_length:
+        description: "Minimum non-whitespace character count inside a required-text block"
         type: number
         required: false
         default: 10
 
 permissions:
-  pull-requests: read
+  pull-requests: read # Required to read pull request body for validation
 
 jobs:
   required-text-check:
-    runs-on: ubuntu-latest
+    name: required-text-check
+    runs-on: ubuntu-slim
+    concurrency:
+      group: ${{ github.workflow }}-required-text-${{ github.event.pull_request.number || github.run_id }}
+      cancel-in-progress: true
     steps:
       - name: Fail if required-text region is empty
-        uses: actions/github-script@v7
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        env:
+          START_TAG: "<!-- required-text-start -->"
+          END_TAG: "<!-- required-text-end -->"
+          MIN_LENGTH: ${{ inputs.min_length }}
         with:
           script: |
-            const body = context.payload.pull_request?.body || "";
-            const startTag = `${{ inputs.start_tag }}`;
-            const endTag   = `${{ inputs.end_tag }}`;
-            const minLen   = Math.max(1, Number(`${{ inputs.min_length }}`) || 1);
-
+            const body = context.payload.pull_request?.body ?? "";
             const esc = s => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+            const minLen = Math.max(1, Number(process.env.MIN_LENGTH) || 1);
+
+            const startTag = process.env.START_TAG;
+            const endTag = process.env.END_TAG;
 
             if (body.includes(startTag) && !body.includes(endTag))
               return core.setFailed("Found required-text-start but no required-text-end.");
@@ -49,16 +50,26 @@ jobs:
             const matches = [...body.matchAll(re)];
             if (matches.length === 0) return;
 
-            const bad = matches.filter(m => ((m[1] || "").replace(/\s+/g, "")).length < minLen).length;
+            const bad = matches.filter(m => m[1].replace(/\s+/g, "").length < minLen).length;
             if (bad) core.setFailed(`${bad} required-text block(s) are empty. Fill in text between the tags.`);
 
   checklist-check:
-    runs-on: ubuntu-latest
+    name: checklist-check
+    runs-on: ubuntu-slim
+    concurrency:
+      group: ${{ github.workflow }}-checklist-${{ github.event.pull_request.number || github.run_id }}
+      cancel-in-progress: true
     steps:
-      - uses: actions/github-script@v7
+      - name: Fail if checklist has unchecked items
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        env:
+          IGNORE_START_TAG: "<!-- ignore-task-list-start -->"
+          IGNORE_END_TAG: "<!-- ignore-task-list-end -->"
         with:
           script: |
-            const body = context.payload.pull_request?.body || "";
-            const cleaned = body.replace(/<!-- ignore-task-list-start -->[\s\S]*?<!-- ignore-task-list-end -->/g, "");
+            const body = context.payload.pull_request?.body ?? "";
+            const esc = s => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+            const ignoreRe = new RegExp(`${esc(process.env.IGNORE_START_TAG)}[\\s\\S]*?${esc(process.env.IGNORE_END_TAG)}`, "g");
+            const cleaned = body.replace(ignoreRe, "");
             const unchecked = (cleaned.match(/^\s*-\s*\[\s*\]\s+/gm) || []).length;
             if (unchecked) core.setFailed(`${unchecked} unchecked checklist item(s) found in PR description.`);
