@@ -36,7 +36,7 @@ jobs:
     name: Helm Lint & Test
     runs-on: ubuntu-latest
     concurrency:
-      group: ${{ github.workflow }}-helm-lint-test-${{ github.event.pull_request.number }}
+      group: ${{ github.workflow }}-helm-lint-test-${{ github.event.pull_request.number || github.run_id }}
       cancel-in-progress: true
     permissions:
       contents: read

@@ -42,7 +42,7 @@ jobs:
   # job_workflow_ref claim. Runs in a separate job to keep id-token: write
   # scoped away from the main analysis job.
   resolve-workflow-ref:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-slim
     permissions:
       contents: read
       id-token: write
@@ -113,7 +113,7 @@ jobs:
   zizmor:
     name: zizmor
     needs: resolve-workflow-ref
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-slim
     permissions:
       actions: read
       security-events: write

@@ -68,14 +68,14 @@ permissions:
 jobs:
   notify:
     name: Notify Slack
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-slim
     concurrency:
       group: ${{ github.workflow }}-${{ github.ref }}
       cancel-in-progress: false
     steps:
       - name: Find merged PRs missing production release labels
         id: find
-        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8.0.0
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
         env:
           TARGET_BRANCH: ${{ inputs.target_branch }}
           CREATED_AFTER: ${{ inputs.created_after }}
@@ -164,7 +164,7 @@ jobs:
       - name: Build Slack payload (valid JSON)
         id: slack
         if: steps.find.outputs.count != '0'
-        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8.0.0
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
         env:
           PRS_JSON: ${{ steps.find.outputs.prs_json }}
           TARGET_BRANCH: ${{ steps.find.outputs.target_branch }}
