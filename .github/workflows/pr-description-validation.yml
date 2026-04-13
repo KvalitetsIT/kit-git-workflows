@@ -8,7 +8,12 @@ name: PR Body Validation (Reusable)
 
 on:
   workflow_call:
-    inputs: {}
+    inputs:
+      min_length:
+        description: "Minimum non-whitespace character count inside a required-text block"
+        type: number
+        required: false
+        default: 10
 
 permissions:
   pull-requests: read # Required to read pull request body for validation
@@ -26,7 +31,7 @@ jobs:
         env:
           START_TAG: "<!-- required-text-start -->"
           END_TAG: "<!-- required-text-end -->"
-          MIN_LENGTH: 10
+          MIN_LENGTH: ${{ inputs.min_length }}
         with:
           script: |
             const body = context.payload.pull_request?.body ?? "";
