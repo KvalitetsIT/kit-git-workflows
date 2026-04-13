@@ -7,43 +7,7 @@ name: PR Body Validation (Reusable)
 
 
 on:
-  workflow_call:
-    inputs:
-      required_text_enabled:
-        description: "Enable the required-text block check"
-        type: boolean
-        required: false
-        default: true
-      start_tag:
-        description: "Opening tag for required-text blocks"
-        type: string
-        required: false
-        default: "<!-- required-text-start -->"
-      end_tag:
-        description: "Closing tag for required-text blocks"
-        type: string
-        required: false
-        default: "<!-- required-text-end -->"
-      min_length:
-        description: "Minimum non-whitespace character count inside a required-text block"
-        type: number
-        required: false
-        default: 10
-      checklist_enabled:
-        description: "Enable the checklist (task list) check"
-        type: boolean
-        required: false
-        default: true
-      ignore_start_tag:
-        description: "Opening tag for checklist ignore regions"
-        type: string
-        required: false
-        default: "<!-- ignore-task-list-start -->"
-      ignore_end_tag:
-        description: "Closing tag for checklist ignore regions"
-        type: string
-        required: false
-        default: "<!-- ignore-task-list-end -->"
+  workflow_call
 
 permissions:
   pull-requests: read # Required to read pull request body for validation
@@ -52,7 +16,6 @@ jobs:
   required-text-check:
     name: required-text-check
     runs-on: ubuntu-slim
-    if: ${{ inputs.required_text_enabled }}
     concurrency:
       group: ${{ github.workflow }}-required-text-${{ github.event.pull_request.number || github.run_id }}
       cancel-in-progress: true
@@ -60,9 +23,9 @@ jobs:
       - name: Fail if required-text region is empty
         uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
         env:
-          START_TAG: ${{ inputs.start_tag }}
-          END_TAG: ${{ inputs.end_tag }}
-          MIN_LENGTH: ${{ inputs.min_length }}
+          START_TAG: "<!-- required-text-start -->"
+          END_TAG: "<!-- required-text-end -->"
+          MIN_LENGTH: 10
         with:
           script: |
             const body = context.payload.pull_request?.body ?? "";
@@ -87,7 +50,6 @@ jobs:
   checklist-check:
     name: checklist-check
     runs-on: ubuntu-slim
-    if: ${{ inputs.checklist_enabled }}
     concurrency:
       group: ${{ github.workflow }}-checklist-${{ github.event.pull_request.number || github.run_id }}
       cancel-in-progress: true
@@ -95,8 +57,8 @@ jobs:
       - name: Fail if checklist has unchecked items
         uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
         env:
-          IGNORE_START_TAG: ${{ inputs.ignore_start_tag }}
-          IGNORE_END_TAG: ${{ inputs.ignore_end_tag }}
+          IGNORE_START_TAG: "<!-- ignore-task-list-start -->"
+          IGNORE_END_TAG: "<!-- ignore-task-list-end -->"
         with:
           script: |
             const body = context.payload.pull_request?.body ?? "";
