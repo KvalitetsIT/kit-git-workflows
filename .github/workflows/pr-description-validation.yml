@@ -1,4 +1,10 @@
 name: PR Body Validation (Reusable)
+# Validates PR description quality gates:
+# - Required text blocks: If <!-- required-text-start -->...<!-- required-text-end --> blocks exist, each must be non-empty
+#   - If no blocks exist, the check passes
+#   - Fails on unbalanced tags (start without end or end without start)
+# - Checklist: Fails if the PR checklist contains any unchecked tasks (via task-completed-checker)
+
 
 on:
   workflow_call:
