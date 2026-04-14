@@ -14,14 +14,14 @@ detect changed charts, lint them, and optionally install them in a
 1. Checks out the repository with full history (needed by `ct` to detect changes).
 2. Sets up Helm, Python, and chart-testing.
 3. Lists changed charts using `ct list-changed`.
-4. Lints all charts with `ct lint`.
+4. Lints changed charts with `ct lint`.
 5. If charts have changed, creates a KinD cluster.
 6. Optionally installs CRDs and creates namespaces.
 7. Runs `ct install` to install and test the changed charts.
 
 ## Behavior
 
-- The workflow always lints all charts, even if none have changed.
+- The workflow lints charts detected as changed by `ct`; if none have changed, `ct lint` may no-op.
 - Chart installation only runs when `ct list-changed` detects changes.
 - CRD installation waits for each CRD to be established before continuing.
 - Namespace creation is idempotent — existing namespaces are not recreated.
