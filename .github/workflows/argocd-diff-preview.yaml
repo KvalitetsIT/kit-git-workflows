@@ -1,0 +1,119 @@
+name: Argo CD Diff Preview (reusable)
+
+on:
+  workflow_call:
+    inputs:
+      app_of_apps_path:
+        description: "Path to the Helm App-of-Apps chart"
+        type: string
+        required: true
+      values_files:
+        description: "Space-separated list of values files relative to helm_chart_path"
+        type: string
+        required: true
+      tool_version:
+        description: "dagandersen/argocd-diff-preview image version"
+        type: string
+        required: false
+        default: "v0.2.3"
+    secrets:
+      argocd_diff_deploy_key:
+        description: "SSH private key with read access to the repository"
+        required: true
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  diff:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout base branch
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.base.ref }}
+          path: base-branch
+
+      - name: Checkout PR branch
+        uses: actions/checkout@v4
+        with:
+          path: target-branch
+
+      - name: Setup Helm
+        uses: azure/setup-helm@v4
+
+      - name: Render Application CRs (base branch)
+        env:
+          CHART_PATH: ${{ inputs.app_of_apps_path }}
+          VALUES_FILES: ${{ inputs.values_files }}
+        run: |
+          helm dependency update base-branch/${CHART_PATH}
+          value_args=""
+          for f in ${VALUES_FILES}; do
+            value_args="${value_args} -f base-branch/${CHART_PATH}/${f}"
+          done
+          helm template ${value_args} base-branch/${CHART_PATH} > base-branch/rendered-apps.yaml
+
+      - name: Render Application CRs (target branch)
+        env:
+          CHART_PATH: ${{ inputs.app_of_apps_path }}
+          VALUES_FILES: ${{ inputs.values_files }}
+        run: |
+          helm dependency update target-branch/${CHART_PATH}
+          value_args=""
+          for f in ${VALUES_FILES}; do
+            value_args="${value_args} -f target-branch/${CHART_PATH}/${f}"
+          done
+          helm template ${value_args} target-branch/${CHART_PATH} > target-branch/rendered-apps.yaml
+
+      - name: Prepare ArgoCD repository credentials
+        env:
+          DEPLOY_KEY: ${{ secrets.argocd_diff_deploy_key }}
+        run: |
+          mkdir -p secrets
+          printf '%s\n' \
+            'apiVersion: v1' \
+            'kind: Secret' \
+            'metadata:' \
+            '  name: repo-creds' \
+            '  namespace: argocd' \
+            '  labels:' \
+            '    argocd.argoproj.io/secret-type: repository' \
+            'type: Opaque' \
+            'stringData:' \
+            '  type: git' \
+            "  url: git@github.com:${{ github.repository }}.git" \
+            '  sshPrivateKey: |' \
+            > secrets/repo-creds.yaml
+          printf '%s\n' "${DEPLOY_KEY}" | sed 's/^/    /' >> secrets/repo-creds.yaml
+
+      - name: Generate diff
+        run: |
+          mkdir -p output
+          docker run --rm \
+            --network=host \
+            -v /var/run/docker.sock:/var/run/docker.sock \
+            -v $(pwd)/base-branch:/base-branch \
+            -v $(pwd)/target-branch:/target-branch \
+            -v $(pwd)/secrets:/secrets \
+            -v $(pwd)/output:/output \
+            -e BASE_BRANCH=${{ github.event.pull_request.base.ref }} \
+            -e TARGET_BRANCH=refs/pull/${{ github.event.pull_request.number }}/merge \
+            -e REPO=${{ github.repository }} \
+            dagandersen/argocd-diff-preview:${{ inputs.tool_version }}
+
+      - name: Post diff as PR comment
+        if: always()
+        run: |
+          if [ -f output/diff.md ]; then
+            gh pr comment ${{ github.event.pull_request.number }} \
+              --repo ${{ github.repository }} \
+              --edit-last \
+              --body-file output/diff.md || \
+            gh pr comment ${{ github.event.pull_request.number }} \
+              --repo ${{ github.repository }} \
+              --body-file output/diff.md
+          fi
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
