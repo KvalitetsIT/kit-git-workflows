@@ -8,6 +8,13 @@ on:
         type: number
         required: false
         default: 10
+      forbidden_labels:
+        description: "Newline-separated labels that must not be present before merge"
+        type: string
+        required: false
+        default: |
+          production release tested
+          production release no impact
 
 permissions:
   pull-requests: read # Required to read pull request body for validation
@@ -67,3 +74,39 @@ jobs:
             const cleaned = body.replace(ignoreRe, "");
             const unchecked = (cleaned.match(/^\s*-\s*\[\s*\]\s+/gm) || []).length;
             if (unchecked) core.setFailed(`${unchecked} unchecked checklist item(s) found in PR description.`);
+
+  forbidden-pre-merge-label-check:
+    name: forbidden-pre-merge-label-check
+    runs-on: ubuntu-slim
+    concurrency:
+      group: ${{ github.workflow }}-forbidden-label-${{ github.event.pull_request.number || github.run_id }}
+      cancel-in-progress: true
+    steps:
+      - name: Fail if post-merge labels are set before merge
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        env:
+          FORBIDDEN_LABELS: ${{ inputs.forbidden_labels }}
+        with:
+          script: |
+            const pr = context.payload.pull_request;
+
+            if (!pr) {
+              core.setFailed("This workflow must be run in the context of a pull request.");
+              return;
+            }
+
+            const forbidden = process.env.FORBIDDEN_LABELS
+              .split(/\r?\n/)
+              .map(x => x.trim().toLowerCase())
+              .filter(Boolean);
+
+            const labels = (pr.labels ?? [])
+              .map(label => label.name.toLowerCase());
+
+            const matches = labels.filter(label => forbidden.includes(label));
+
+            if (matches.length > 0) {
+              core.setFailed(
+                `The following label(s) must only be added after the PR is merged: ${matches.join(", ")}`
+              );
+            }
