@@ -179,7 +179,7 @@ jobs:
             //   "githubUser": "U0123ABC456",
             const GH_TO_SLACK = {
               "mbirchdk": "U020L9U4E1J",
-              "fkokit": "U09CJU6QT6Z",
+              "fkold": "U09CJU6QT6Z",
               "bork91": "U013QNWS8KA",
               "henrikmagni": "U0359KM0F41",
               "luxass": "U09QALE55K8",
