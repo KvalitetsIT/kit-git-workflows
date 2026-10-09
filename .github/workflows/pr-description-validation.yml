@@ -95,6 +95,10 @@ jobs:
               return;
             }
 
+            if (pr.merged) {
+              return;
+            }
+
             const forbidden = process.env.FORBIDDEN_LABELS
               .split(/\r?\n/)
               .map(x => x.trim().toLowerCase())
