@@ -1,0 +1,1116 @@
+name: Create PR for k8s-components updates
+
+on:
+  workflow_call:
+    inputs:
+      source_repo_url:
+        description: "Exact repoURL to match in sources[].repoURL"
+        type: string
+        required: false
+        default: "git@github.com:KvalitetsIT/k8s-components.git"
+      prod-app-of-apps-file-path:
+        description: "Full path to the app-of-apps values-prod file that uses argocd-apps-chart"
+        type: string
+        required: true
+      target_branch:
+        description: "Branch to read app-of-apps values files from and target with the update PRs"
+        type: string
+        required: false
+        default: "main"
+      max_prs_per_run:
+        description: "Maximum number of component PRs to create per workflow run"
+        type: number
+        required: false
+        default: 5
+      max_release_notes:
+        description: "Maximum number of matched release-note entries to include in PR comments"
+        type: number
+        required: false
+        default: 5
+      pr_labels:
+        description: "Comma-separated additional labels to apply to created PRs"
+        type: string
+        required: false
+        default: ""
+      pr_template_path:
+        description: "Path in KvalitetsIT/.github@main to PR template file"
+        type: string
+        required: false
+        default: "PULL_REQUEST_TEMPLATE.md"
+    secrets:
+      k8s_repo_token:
+        description: "Token used when calling source repo and KvalitetsIT/.github APIs"
+        required: true
+
+permissions: {}
+
+jobs:
+  prepare:
+    name: Resolve release and changed components
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    outputs:
+      source_owner: ${{ steps.source-repo.outputs.owner }}
+      source_repo: ${{ steps.source-repo.outputs.repo }}
+      latest_tag: ${{ steps.latest.outputs.tag }}
+      release_name: ${{ steps.latest.outputs.name }}
+      release_url: ${{ steps.latest.outputs.url }}
+      release_notes: ${{ steps.latest.outputs.notes }}
+      changed_components_json: ${{ steps.detect.outputs.changed_components_json }}
+      changed_components_count: ${{ steps.detect.outputs.changed_components_count }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          token: ${{ github.token }}
+          fetch-depth: 0
+          ref: ${{ inputs.target_branch }}
+          persist-credentials: false
+
+      - name: Resolve source repository
+        id: source-repo
+        env:
+          SOURCE_REPO_URL: ${{ inputs.source_repo_url }}
+        run: |
+          set -euo pipefail
+
+          url="${SOURCE_REPO_URL}"
+
+          owner_repo=""
+          if [[ "$url" =~ ^git@github\.com:([^/]+/[^/]+?)(\.git)?$ ]]; then
+            owner_repo="${BASH_REMATCH[1]}"
+          elif [[ "$url" =~ ^https://github\.com/([^/]+/[^/]+?)(\.git)?/?$ ]]; then
+            owner_repo="${BASH_REMATCH[1]}"
+          else
+            echo "::error::Unsupported source_repo_url format: ${url}"
+            exit 1
+          fi
+
+          owner_repo="${owner_repo%.git}"
+
+          owner="${owner_repo%%/*}"
+          repo="${owner_repo##*/}"
+          echo "owner=${owner}" >> "$GITHUB_OUTPUT"
+          echo "repo=${repo}" >> "$GITHUB_OUTPUT"
+
+      - name: Resolve latest release or tag
+        id: latest
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        env:
+          SOURCE_OWNER: ${{ steps.source-repo.outputs.owner }}
+          SOURCE_REPO: ${{ steps.source-repo.outputs.repo }}
+        with:
+          github-token: ${{ secrets.k8s_repo_token }}
+          script: |
+            const owner = process.env.SOURCE_OWNER;
+            const repo = process.env.SOURCE_REPO;
+            let tag = '';
+            let name = '';
+            let url = '';
+            let notes = '';
+
+            try {
+              const release = await github.rest.repos.getLatestRelease({ owner, repo });
+              tag = release.data?.tag_name || '';
+              name = release.data?.name || '';
+              url = release.data?.html_url || '';
+              notes = release.data?.body || '';
+            } catch (_) {
+              // fallback handled below
+            }
+
+            if (!tag) {
+              const tags = await github.rest.repos.listTags({ owner, repo, per_page: 1 });
+              tag = tags.data?.[0]?.name || '';
+              name = '';
+              url = tag ? `https://github.com/${owner}/${repo}/releases/tag/${tag}` : '';
+              notes = '';
+            }
+
+            if (!tag || tag === 'null' || tag.startsWith('{') || tag.startsWith('[')) {
+              core.setFailed(`Unable to resolve latest release/tag for ${owner}/${repo}. Ensure workflow_call secret 'k8s_repo_token' has read access to the source repository.`);
+              return;
+            }
+
+            core.setOutput('tag', tag);
+            core.setOutput('name', name);
+            core.setOutput('url', url);
+            core.setOutput('notes', notes);
+
+      - name: Setup yq
+        uses: mikefarah/yq@v4.44.5
+
+      - name: Detect changed components
+        id: detect
+        env:
+          TARGET_REPO_URL: ${{ inputs.source_repo_url }}
+          PROD_APP_OF_APPS_FILE_PATH: ${{ inputs['prod-app-of-apps-file-path'] }}
+          NEW_TARGET_REVISION: ${{ steps.latest.outputs.tag }}
+          MAX_PRS_PER_RUN: ${{ inputs.max_prs_per_run }}
+          GH_TOKEN: ${{ secrets.k8s_repo_token }}
+          SOURCE_OWNER: ${{ steps.source-repo.outputs.owner }}
+          SOURCE_REPO: ${{ steps.source-repo.outputs.repo }}
+        run: |
+          set -euo pipefail
+          if [[ -z "${PROD_APP_OF_APPS_FILE_PATH}" ]]; then
+            echo "::error::Input 'prod-app-of-apps-file-path' must be set."
+            exit 1
+          fi
+          if [[ ! -f "${PROD_APP_OF_APPS_FILE_PATH}" ]]; then
+            echo "::error::prod-app-of-apps-file-path does not exist: ${PROD_APP_OF_APPS_FILE_PATH}"
+            exit 1
+          fi
+
+          echo "Using prod app-of-apps file: ${PROD_APP_OF_APPS_FILE_PATH}"
+          echo "Target repo URL match: ${TARGET_REPO_URL}"
+          echo "New target revision: ${NEW_TARGET_REVISION}"
+          all_entries_json="$(
+            yq -o=json '
+              [
+                (
+                  .. | select(tag == "!!map" and has("source"))
+                  | .source
+                  | select(type == "!!map" and .path != null and .targetRevision != null)
+                  | {"repo_url": ((.repoURL // "") | tostring), "component_name": (.path | tostring), "old_tag": (.targetRevision | tostring)}
+                ),
+                (
+                  .. | select(tag == "!!map" and has("sources"))
+                  | .sources[]?
+                  | select(.path != null and .targetRevision != null)
+                  | {"repo_url": ((.repoURL // "") | tostring), "component_name": (.path | tostring), "old_tag": (.targetRevision | tostring)}
+                )
+              ] | map(select(.component_name != "" and .old_tag != ""))
+            ' "${PROD_APP_OF_APPS_FILE_PATH}"
+          )"
+          ALL_ENTRIES_JSON="${all_entries_json}" python <<'PY'
+          import hashlib
+          import json
+          import os
+          import subprocess
+          import sys
+
+          def normalize_repo_ref(value: str) -> str:
+              s = (value or '').replace('\r', '').strip()
+              for prefix in ('git@github.com:', 'https://github.com/', 'http://github.com/'):
+                  if s.startswith(prefix):
+                      s = s[len(prefix):]
+              if s.endswith('.git'):
+                  s = s[:-4]
+              return s.strip('/').strip()
+
+          def clean(value: str) -> str:
+              return (value or '').replace('\r', '').strip()
+
+          def gh_compare(owner: str, repo: str, compare_ref: str):
+              result = subprocess.run(
+                  ['gh', 'api', f'repos/{owner}/{repo}/compare/{compare_ref}'],
+                  capture_output=True,
+                  text=True,
+                  check=False,
+              )
+              if result.returncode != 0:
+                  return None, result.stdout + result.stderr
+              try:
+                  return json.loads(result.stdout), ''
+              except json.JSONDecodeError:
+                  return None, result.stdout
+
+          max_prs_raw = os.environ.get('MAX_PRS_PER_RUN', '0')
+          max_prs_per_run = int(max_prs_raw) if max_prs_raw.isdigit() else 0
+          target_repo_ref = normalize_repo_ref(os.environ.get('TARGET_REPO_URL', ''))
+          new_target_revision_clean = clean(os.environ.get('NEW_TARGET_REVISION', ''))
+          source_owner = os.environ.get('SOURCE_OWNER', '')
+          source_repo = os.environ.get('SOURCE_REPO', '')
+          prod_file = os.environ.get('PROD_APP_OF_APPS_FILE_PATH', '')
+          output_file = os.environ.get('GITHUB_OUTPUT')
+
+          try:
+              all_entries = json.loads(os.environ.get('ALL_ENTRIES_JSON', '[]'))
+          except json.JSONDecodeError:
+              all_entries = []
+
+          all_entries_total = len(all_entries)
+          print(f'DEBUG file={prod_file} entries_total={all_entries_total}')
+          if all_entries_total > 0:
+              print('DEBUG first entries:')
+              for item in all_entries[:5]:
+                  print(json.dumps(item, separators=(',', ':')))
+
+          candidates = []
+          seen_components = set()
+          selected = 0
+          skipped_duplicate = 0
+          skipped_already_latest = 0
+          skipped_repo_mismatch = 0
+          compare_api_failures = 0
+          skipped_no_path_changes = 0
+          stopped_due_to_max = 0
+          matched_entries_total = 0
+
+          for entry in all_entries:
+              if selected >= max_prs_per_run:
+                  stopped_due_to_max = 1
+                  break
+
+              repo_ref = normalize_repo_ref(entry.get('repo_url', ''))
+              if repo_ref != target_repo_ref:
+                  skipped_repo_mismatch += 1
+                  continue
+              matched_entries_total += 1
+
+              component_name = clean(entry.get('component_name', ''))
+              old_tag = clean(entry.get('old_tag', ''))
+              if not component_name or not old_tag:
+                  continue
+              if component_name in seen_components:
+                  skipped_duplicate += 1
+                  continue
+              if old_tag == new_target_revision_clean:
+                  skipped_already_latest += 1
+                  continue
+
+              compare_ref = f'{old_tag}...{new_target_revision_clean}'
+              compare_url = f'https://github.com/{source_owner}/{source_repo}/compare/{compare_ref}'
+              compare_data, compare_error = gh_compare(source_owner, source_repo, compare_ref)
+              if compare_data is None:
+                  compare_api_failures += 1
+                  print(f'DEBUG compare API failed for component={component_name} compare_ref={compare_ref}: {compare_error.strip()}')
+                  continue
+
+              matching_files = []
+              for file_entry in compare_data.get('files', []) or []:
+                  filename = str(file_entry.get('filename', '')).lstrip('/')
+                  if not filename:
+                      continue
+                  if filename == component_name or filename.startswith(f'{component_name}/'):
+                      matching_files.append(filename)
+              if not matching_files:
+                  skipped_no_path_changes += 1
+                  continue
+
+              path_diff_links = []
+              for filename in matching_files:
+                  diff_sha = hashlib.sha256(filename.encode()).hexdigest()
+                  path_diff_links.append({
+                      'filename': filename,
+                      'compare_sha256_url': f'{compare_url}#diff-{diff_sha}',
+                  })
+              if not path_diff_links:
+                  continue
+
+              candidates.append({
+                  'component_name': component_name,
+                  'old_tag': old_tag,
+                  'compare_url': compare_url,
+                  'path_diff_links': path_diff_links,
+              })
+              seen_components.add(component_name)
+              selected += 1
+
+          print(
+              'DEBUG summary: '
+              f'entries_total={all_entries_total} '
+              f'entries_repo_match={matched_entries_total} '
+              f'selected={selected} '
+              f'skipped_repo_mismatch={skipped_repo_mismatch} '
+              f'skipped_duplicate={skipped_duplicate} '
+              f'skipped_already_latest={skipped_already_latest} '
+              f'compare_api_failures={compare_api_failures} '
+              f'skipped_no_path_changes={skipped_no_path_changes} '
+              f'stopped_due_to_max={stopped_due_to_max}'
+          )
+          print(f'Selected {selected} components for this run (max_prs_per_run={max_prs_per_run}).')
+          for candidate in candidates:
+              print(f"- {candidate['component_name']} ({candidate['old_tag']} -> {new_target_revision_clean})")
+
+          if selected == 0:
+              print(
+                  f"::error::No eligible components found in k8s-components compare flow for prod-app-of-apps file '{prod_file}'. See DEBUG logs above."
+              )
+              sys.exit(1)
+
+          if not output_file:
+              print('::error::GITHUB_OUTPUT is not set.')
+              sys.exit(1)
+
+          with open(output_file, 'a', encoding='utf-8') as fh:
+              fh.write(f'changed_components_count={selected}\n')
+              fh.write(f"changed_components_json={json.dumps(candidates, separators=(',', ':'))}\n")
+          PY
+
+  create-component-pr:
+    name: Create PR for component
+    needs: prepare
+    if: needs.prepare.outputs.changed_components_count != '0'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+      pull-requests: write
+      issues: write
+    strategy:
+      fail-fast: false
+      matrix:
+        component: ${{ fromJson(needs.prepare.outputs.changed_components_json) }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          token: ${{ github.token }}
+          fetch-depth: 0
+          ref: ${{ inputs.target_branch }}
+          persist-credentials: false
+
+      - name: Update component targetRevision
+        id: update
+        env:
+          TARGET_REPO_URL: ${{ inputs.source_repo_url }}
+          PROD_APP_OF_APPS_FILE_PATH: ${{ inputs['prod-app-of-apps-file-path'] }}
+          NEW_TARGET_REVISION: ${{ needs.prepare.outputs.latest_tag }}
+          COMPONENT_NAME: ${{ matrix.component.component_name }}
+        run: |
+          set -euo pipefail
+          updater_script="${RUNNER_TEMP}/update_argo_target_revision_lines.py"
+          cat > "${updater_script}" <<'PY'
+          from __future__ import annotations
+          
+          import os
+          import re
+          import sys
+          from pathlib import Path
+          
+          
+          def indent_of(line: str) -> int:
+              """Return leading-space indentation width for a YAML line."""
+              return len(line) - len(line.lstrip(" "))
+          
+          
+          def normalize_yaml_scalar(value: str) -> str:
+              """Normalize a scalar by trimming whitespace and optional matching quotes."""
+              trimmed = value.strip()
+              if len(trimmed) >= 2 and trimmed[0] == trimmed[-1] and trimmed[0] in {"'", '"'}:
+                  return trimmed[1:-1]
+              return trimmed
+          
+          
+          def update_file(file_path: Path, target_repo_url: str, component_name: str, new_target_revision: str) -> bool:
+              """
+              Update only matching targetRevision value lines while preserving file formatting.
+          
+              A line is updated when:
+              - repoURL matches target_repo_url
+              - path matches component_name
+              - targetRevision exists and differs from new_target_revision
+              Supports both `source:` and `sources:` Argo structures.
+              """
+              original = file_path.read_text(encoding="utf-8")
+              lines = original.splitlines(keepends=True)
+              changed = False
+          
+              i = 0
+              while i < len(lines):
+                  source_single_match = re.match(r"^(\s*)source:\s*(?:#.*)?\r?\n?$", lines[i])
+                  sources_match = re.match(r"^(\s*)sources:\s*(?:#.*)?\r?\n?$", lines[i])
+                  if not source_single_match and not sources_match:
+                      i += 1
+                      continue
+          
+                  if source_single_match:
+                      source_indent = len(source_single_match.group(1))
+                      block_start = i + 1
+                      i = block_start
+                      while i < len(lines):
+                          stripped = lines[i].strip()
+                          if stripped and not stripped.startswith("#") and indent_of(lines[i]) <= source_indent:
+                              break
+                          i += 1
+                      block_end = i
+          
+                      field_indent = None
+                      for line_idx in range(block_start, block_end):
+                          stripped = lines[line_idx].strip()
+                          if not stripped or stripped.startswith("#"):
+                              continue
+                          line_indent = indent_of(lines[line_idx])
+                          if line_indent > source_indent:
+                              if field_indent is None or line_indent < field_indent:
+                                  field_indent = line_indent
+                      if field_indent is None:
+                          continue
+          
+                      repo_url_matches = False
+                      target_line_idx = None
+                      target_line_match = None
+                      component_matches = False
+                      for line_idx in range(block_start, block_end):
+                          stripped = lines[line_idx].strip()
+                          if not stripped or stripped.startswith("#"):
+                              continue
+                          line_indent = indent_of(lines[line_idx])
+                          if line_indent != field_indent:
+                              continue
+          
+                          repo_match = re.match(r"^\s*repoURL:\s*([^#\r\n]+?)\s*(?:#.*)?\r?\n?$", lines[line_idx])
+                          if repo_match:
+                              repo_url_matches = normalize_yaml_scalar(repo_match.group(1)) == target_repo_url
+          
+                          target_match = re.match(r"^(\s*targetRevision:\s*)([^#\r\n]+?)(\s*(?:#.*)?)(\r?\n?)$", lines[line_idx])
+                          if target_match:
+                              target_line_idx = line_idx
+                              target_line_match = target_match
+          
+                          path_match = re.match(r"^\s*path:\s*([^#\r\n]+?)\s*(?:#.*)?\r?\n?$", lines[line_idx])
+                          if path_match:
+                              component_matches = normalize_yaml_scalar(path_match.group(1)) == component_name
+          
+                      if not repo_url_matches or target_line_idx is None or target_line_match is None or not component_matches:
+                          continue
+          
+                      current_value = normalize_yaml_scalar(target_line_match.group(2))
+                      if current_value == new_target_revision:
+                          continue
+          
+                      existing_raw = target_line_match.group(2).strip()
+                      if len(existing_raw) >= 2 and existing_raw[0] == existing_raw[-1] and existing_raw[0] in {"'", '"'}:
+                          replacement = f"{existing_raw[0]}{new_target_revision}{existing_raw[0]}"
+                      else:
+                          replacement = new_target_revision
+          
+                      lines[target_line_idx] = (
+                          f"{target_line_match.group(1)}{replacement}{target_line_match.group(3)}{target_line_match.group(4)}"
+                      )
+                      changed = True
+                      continue
+          
+                  sources_indent = len(sources_match.group(1))
+                  block_start = i + 1
+                  i = block_start
+                  while i < len(lines):
+                      stripped = lines[i].strip()
+                      if stripped and not stripped.startswith("#") and indent_of(lines[i]) <= sources_indent:
+                          break
+                      i += 1
+                  block_end = i
+          
+                  item_starts = []
+                  for idx in range(block_start, block_end):
+                      if re.match(r"^\s*-\s+", lines[idx]) and indent_of(lines[idx]) > sources_indent:
+                          item_starts.append(idx)
+          
+                  for idx, item_start in enumerate(item_starts):
+                      item_end = item_starts[idx + 1] if idx + 1 < len(item_starts) else block_end
+                      item_indent = indent_of(lines[item_start])
+          
+                      repo_url_matches = False
+                      target_line_idx = None
+                      target_line_match = None
+                      component_matches = False
+          
+                      item_start_repo_match = re.match(r"^\s*-\s*repoURL:\s*([^#\r\n]+?)\s*(?:#.*)?\r?\n?$", lines[item_start])
+                      if item_start_repo_match:
+                          repo_url_matches = normalize_yaml_scalar(item_start_repo_match.group(1)) == target_repo_url
+          
+                      item_start_target_match = re.match(r"^(\s*-\s*targetRevision:\s*)([^#\r\n]+?)(\s*(?:#.*)?)(\r?\n?)$", lines[item_start])
+                      if item_start_target_match:
+                          target_line_idx = item_start
+                          target_line_match = item_start_target_match
+          
+                      item_start_path_match = re.match(r"^\s*-\s*path:\s*([^#\r\n]+?)\s*(?:#.*)?\r?\n?$", lines[item_start])
+                      if item_start_path_match:
+                          component_matches = normalize_yaml_scalar(item_start_path_match.group(1)) == component_name
+          
+                      field_indent = None
+                      for line_idx in range(item_start + 1, item_end):
+                          stripped = lines[line_idx].strip()
+                          if not stripped or stripped.startswith("#"):
+                              continue
+                          line_indent = indent_of(lines[line_idx])
+                          if line_indent > item_indent:
+                              if field_indent is None or line_indent < field_indent:
+                                  field_indent = line_indent
+                      if field_indent is not None:
+                          for line_idx in range(item_start + 1, item_end):
+                              stripped = lines[line_idx].strip()
+                              if not stripped or stripped.startswith("#"):
+                                  continue
+                              line_indent = indent_of(lines[line_idx])
+                              if line_indent != field_indent:
+                                  continue
+          
+                              repo_match = re.match(r"^\s*repoURL:\s*([^#\r\n]+?)\s*(?:#.*)?\r?\n?$", lines[line_idx])
+                              if repo_match:
+                                  repo_url_matches = repo_url_matches or (normalize_yaml_scalar(repo_match.group(1)) == target_repo_url)
+          
+                              target_match = re.match(r"^(\s*targetRevision:\s*)([^#\r\n]+?)(\s*(?:#.*)?)(\r?\n?)$", lines[line_idx])
+                              if target_match:
+                                  target_line_idx = line_idx
+                                  target_line_match = target_match
+          
+                              path_match = re.match(r"^\s*path:\s*([^#\r\n]+?)\s*(?:#.*)?\r?\n?$", lines[line_idx])
+                              if path_match:
+                                  component_matches = component_matches or (normalize_yaml_scalar(path_match.group(1)) == component_name)
+          
+                      if not repo_url_matches or target_line_idx is None or target_line_match is None or not component_matches:
+                          continue
+          
+                      current_value = normalize_yaml_scalar(target_line_match.group(2))
+                      if current_value == new_target_revision:
+                          continue
+          
+                      existing_raw = target_line_match.group(2).strip()
+                      if len(existing_raw) >= 2 and existing_raw[0] == existing_raw[-1] and existing_raw[0] in {"'", '"'}:
+                          replacement = f"{existing_raw[0]}{new_target_revision}{existing_raw[0]}"
+                      else:
+                          replacement = new_target_revision
+          
+                      lines[target_line_idx] = (
+                          f"{target_line_match.group(1)}{replacement}{target_line_match.group(3)}{target_line_match.group(4)}"
+                      )
+                      changed = True
+          
+              if changed:
+                  file_path.write_text("".join(lines), encoding="utf-8")
+              return changed
+          
+          
+          def main() -> int:
+              """CLI entrypoint used by the workflow; returns 0 when file changed, 1 when unchanged."""
+              if len(sys.argv) != 2:
+                  print("Usage: update_argo_target_revision_lines.py <file_path>", file=sys.stderr)
+                  return 2
+              file_path = Path(sys.argv[1])
+              changed = update_file(
+                  file_path=file_path,
+                  target_repo_url=os.environ["TARGET_REPO_URL"],
+                  component_name=os.environ["COMPONENT_NAME"],
+                  new_target_revision=os.environ["NEW_TARGET_REVISION"],
+              )
+              return 0 if changed else 1
+          
+          
+          if __name__ == "__main__":
+              raise SystemExit(main())
+          PY
+
+          changed_files=()
+          if [[ -z "${PROD_APP_OF_APPS_FILE_PATH}" ]]; then
+            echo "::error::Input 'prod-app-of-apps-file-path' must be set."
+            exit 1
+          fi
+
+          parent_dir="$(dirname "${PROD_APP_OF_APPS_FILE_PATH}")"
+          if [[ "${parent_dir}" == "." ]]; then
+            mapfile -t candidate_files < <(git ls-files 'values-*.yaml' 'values-*.yml')
+          else
+            mapfile -t candidate_files < <(git ls-files "${parent_dir}/values-*.yaml" "${parent_dir}/values-*.yml")
+          fi
+          if [[ "${#candidate_files[@]}" -eq 0 ]]; then
+            echo "::error::No values-*.yml/yaml files found in directory: ${parent_dir}"
+            exit 1
+          fi
+
+          for file_path in "${candidate_files[@]}"; do
+            if python "${updater_script}" "${file_path}"
+            then
+              changed_files+=("${file_path}")
+            fi
+          done
+
+          {
+            if [[ "${#changed_files[@]}" -gt 0 ]]; then
+              echo "has_changes=true"
+            else
+              echo "has_changes=false"
+            fi
+            echo "changed_files<<EOF"
+            printf '%s\n' "${changed_files[@]}"
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Prepare PR metadata
+        if: steps.update.outputs.has_changes == 'true'
+        id: pr-meta
+        env:
+          COMPONENT_NAME: ${{ matrix.component.component_name }}
+          OLD_TAG: ${{ matrix.component.old_tag }}
+          COMPARE_URL: ${{ matrix.component.compare_url }}
+          PATH_DIFF_LINKS_JSON: ${{ toJson(matrix.component.path_diff_links) }}
+          TARGET_REPO_URL: ${{ inputs.source_repo_url }}
+          NEW_TAG: ${{ needs.prepare.outputs.latest_tag }}
+          RELEASE_NAME: ${{ needs.prepare.outputs.release_name }}
+          RELEASE_URL: ${{ needs.prepare.outputs.release_url }}
+          BASE_LABELS: ${{ inputs.pr_labels }}
+          AUTOUPDATE_LABEL: AutoUpdate
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        with:
+          github-token: ${{ github.token }}
+          script: |
+            const sanitize = (value) =>
+              (value || '').replace(/[/:@ ]/g, '-').replace(/[^a-zA-Z0-9._-]/g, '');
+            const componentName = (process.env.COMPONENT_NAME || '').trim();
+            const oldTag = (process.env.OLD_TAG || '').trim();
+            const newTag = (process.env.NEW_TAG || '').trim();
+            const componentSuffix = sanitize(componentName);
+            const tagSuffix = sanitize(newTag);
+            const suffix = `${componentSuffix}-${tagSuffix}` || 'latest';
+            const branchName = `chore/update-k8s-component-${suffix}`;
+            const expectedTitle = `Update ${componentName} (${oldTag} => ${newTag})`;
+            const branchPrefix = `chore/update-k8s-component-${componentSuffix}-`;
+            core.setOutput('branch_name', branchName);
+
+            // Find existing open PRs for this component branch prefix so we can deduplicate safely.
+            const openPullRequests = await github.paginate(github.rest.pulls.list, {
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              state: 'open',
+              per_page: 100,
+            });
+            const componentOpenPulls = openPullRequests.filter(pr => (pr.head?.ref || '').startsWith(branchPrefix));
+            const existingSameTitlePr = componentOpenPulls.find(pr => pr.title === expectedTitle);
+            if (existingSameTitlePr) {
+              core.setOutput('skip_create', 'true');
+              core.setOutput('existing_pr_number', String(existingSameTitlePr.number));
+              core.setOutput('milestone_number', existingSameTitlePr.milestone?.number ? String(existingSameTitlePr.milestone.number) : '');
+              core.info(`Found existing open PR #${existingSameTitlePr.number} with same title. Skipping close/reopen.`);
+              return;
+            }
+            const previousPrWithMilestone = componentOpenPulls.find(pr => pr.milestone?.number);
+            core.setOutput('milestone_number', previousPrWithMilestone?.milestone?.number ? String(previousPrWithMilestone.milestone.number) : '');
+            for (const pr of componentOpenPulls) {
+              await github.rest.pulls.update({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                pull_number: pr.number,
+                state: 'closed',
+              });
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: pr.number,
+                body: 'Superseded by a newer k8s-components update for this component.',
+              });
+            }
+            core.setOutput('skip_create', 'false');
+
+            const baseLabels = (process.env.BASE_LABELS || '')
+              .split(',')
+              .map(x => x.trim())
+              .filter(Boolean);
+            const autoLabel = (process.env.AUTOUPDATE_LABEL || '').trim();
+            const versionLabel = newTag;
+            const ensureLabel = async (name, color, description) => {
+              if (!name) return false;
+              try {
+                await github.rest.issues.getLabel({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  name,
+                });
+                return true;
+              } catch (e) {
+                if (e.status !== 404) return false;
+              }
+              try {
+                await github.rest.issues.createLabel({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  name,
+                  color,
+                  description,
+                });
+                return true;
+              } catch (_) {
+                return false;
+              }
+            };
+            const finalLabels = [];
+            if (await ensureLabel(autoLabel, '1d76db', 'automatic update')) finalLabels.push(autoLabel);
+            for (const lbl of baseLabels) {
+              if (await ensureLabel(lbl, '1d76db', `auto label ${lbl}`)) finalLabels.push(lbl);
+            }
+            if (await ensureLabel(versionLabel, '1d76db', `k8s-components version ${versionLabel}`)) finalLabels.push(versionLabel);
+            if (await ensureLabel(componentName, '0e8a16', `k8s component ${componentName}`)) finalLabels.push(componentName);
+            const dedupedLabels = [...new Set(finalLabels)];
+            core.setOutput('labels', dedupedLabels.join(','));
+
+            const sortedLabels = [...dedupedLabels].sort((a, b) => a.localeCompare(b, undefined, { sensitivity: 'base' }));
+            const labelTerms = sortedLabels.map(label => `label:"${label.replace(/"/g, '\\"')}"`);
+            const org = context.repo.owner;
+            // Build one stable organization search URL for completed PRs with the same labels.
+            const baseOrgQuery = `org:${org} is:pr ${labelTerms.join(' ')}`.trim();
+            const completedQuery = `${baseOrgQuery} is:merged sort:updated-desc`;
+            const completedSearchUrl = `https://github.com/search?q=${encodeURIComponent(completedQuery)}&type=issues`;
+
+            const pathLinks = JSON.parse(process.env.PATH_DIFF_LINKS_JSON || '[]');
+            const pathLines = pathLinks.map(item => `- [\`${item.filename}\`](${item.compare_sha256_url})`);
+            const releaseName = (process.env.RELEASE_NAME || '').trim();
+            const releaseUrl = (process.env.RELEASE_URL || '').trim();
+            const releaseLine = releaseName
+              ? `Release: [${releaseName} (${newTag})](${releaseUrl})`
+              : `Release: [${newTag}](${releaseUrl})`;
+            const body = [
+              `This PR updates one component from \`${oldTag}\` to \`${newTag}\`.`,
+              '',
+              'Component:',
+              '',
+              `- \`${componentName}\``,
+              '',
+              'Version transition:',
+              '',
+              `- \`${oldTag}\` => \`${newTag}\``,
+              '',
+              'Matched source repository:',
+              '',
+              `- \`${process.env.TARGET_REPO_URL}\``,
+              '',
+              'Diff:',
+              '',
+              `- [\`${oldTag}...${newTag}\`](${process.env.COMPARE_URL})`,
+              '',
+              'Per-file compare links (best effort):',
+              '',
+              ...pathLines,
+              '',
+              releaseLine,
+              '',
+              'Organization search:',
+              '',
+              `- [Similar merged PRs (same labels)](<${completedSearchUrl}>)`,
+            ].join('\n');
+            core.setOutput('body', body);
+
+            core.setOutput('template_path', 'pr-template.md');
+
+      - name: Fetch pull request template
+        if: steps.update.outputs.has_changes == 'true' && steps.pr-meta.outputs.skip_create != 'true'
+        env:
+          GH_TOKEN: ${{ secrets.k8s_repo_token }}
+          PR_TEMPLATE_PATH: ${{ inputs.pr_template_path }}
+        run: |
+          set -euo pipefail
+          gh api \
+            -H "Accept: application/vnd.github.raw" \
+            "repos/KvalitetsIT/.github/contents/${PR_TEMPLATE_PATH}?ref=main" > pr-template.md
+
+      - name: Commit and push component update branch
+        if: steps.update.outputs.has_changes == 'true' && steps.pr-meta.outputs.skip_create != 'true'
+        id: push-branch
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BRANCH_NAME: ${{ steps.pr-meta.outputs.branch_name }}
+          COMMIT_MESSAGE: "chore: update k8s component ${{ matrix.component.component_name }} to ${{ needs.prepare.outputs.latest_tag }}"
+          CHANGED_FILES: ${{ steps.update.outputs.changed_files }}
+        run: |
+          set -euo pipefail
+
+          git checkout -B "${BRANCH_NAME}"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          while IFS= read -r file; do
+            [[ -z "${file}" ]] && continue
+            git add "${file}"
+          done <<< "${CHANGED_FILES}"
+
+          if git diff --cached --quiet; then
+            echo "branch_name=${BRANCH_NAME}" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          git commit -m "${COMMIT_MESSAGE}"
+          git remote set-url origin "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+          git push --force-with-lease origin "${BRANCH_NAME}"
+          echo "branch_name=${BRANCH_NAME}" >> "$GITHUB_OUTPUT"
+
+      - name: Create pull request with template
+        if: steps.update.outputs.has_changes == 'true' && steps.pr-meta.outputs.skip_create != 'true'
+        id: create-pr
+        uses: devops-infra/action-pull-request@1d8aa3c4a6060a1410641f700f91353af65cc94b # v1.4.0
+        with:
+          github_token: ${{ github.token }}
+          source_branch: ${{ steps.push-branch.outputs.branch_name }}
+          repository: ${{ github.repository }}
+          target_branch: ${{ inputs.target_branch }}
+          draft: true
+          title: "Update ${{ matrix.component.component_name }} (${{ matrix.component.old_tag }} => ${{ needs.prepare.outputs.latest_tag }})"
+          template: ${{ steps.pr-meta.outputs.template_path }}
+          old_string: "Type here"
+          new_string: ${{ steps.pr-meta.outputs.body }}
+          label: ${{ steps.pr-meta.outputs.labels }}
+
+      - name: Apply milestone from previous component PR
+        if: steps.update.outputs.has_changes == 'true' && steps.pr-meta.outputs.skip_create != 'true' && steps.pr-meta.outputs.milestone_number != ''
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        env:
+          BRANCH_NAME: ${{ steps.push-branch.outputs.branch_name }}
+          EXPECTED_TITLE: "Update ${{ matrix.component.component_name }} (${{ matrix.component.old_tag }} => ${{ needs.prepare.outputs.latest_tag }})"
+          MILESTONE_NUMBER: ${{ steps.pr-meta.outputs.milestone_number }}
+        with:
+          github-token: ${{ github.token }}
+          script: |
+            const branchName = process.env.BRANCH_NAME;
+            const expectedTitle = process.env.EXPECTED_TITLE;
+            const milestoneNumber = Number(process.env.MILESTONE_NUMBER);
+            if (!branchName || !Number.isFinite(milestoneNumber)) {
+              core.info('Missing branch or milestone number; skipping milestone sync.');
+              return;
+            }
+
+            const pulls = await github.paginate(github.rest.pulls.list, {
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              state: 'open',
+              head: `${context.repo.owner}:${branchName}`,
+              per_page: 100,
+            });
+            const pr = pulls.find(item => item.title === expectedTitle) || pulls[0];
+            if (!pr) {
+              core.info(`No open PR found on branch ${branchName}; skipping milestone sync.`);
+              return;
+            }
+
+            await github.rest.issues.update({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: pr.number,
+              milestone: milestoneNumber,
+            });
+            core.info(`Applied milestone ${milestoneNumber} to PR #${pr.number}.`);
+
+  comment-component-release-notes:
+    name: Comment component release notes
+    needs:
+      - prepare
+      - create-component-pr
+    if: needs.prepare.outputs.changed_components_count != '0'
+    runs-on: ubuntu-24.04
+    permissions:
+      pull-requests: write
+      issues: write
+    strategy:
+      fail-fast: false
+      matrix:
+        component: ${{ fromJson(needs.prepare.outputs.changed_components_json) }}
+    steps:
+      - name: Resolve target PR by title
+        id: target-pr
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        env:
+          COMPONENT_NAME: ${{ matrix.component.component_name }}
+          OLD_TAG: ${{ matrix.component.old_tag }}
+          NEW_TAG: ${{ needs.prepare.outputs.latest_tag }}
+        with:
+          github-token: ${{ github.token }}
+          script: |
+            const expectedTitle = `Update ${process.env.COMPONENT_NAME} (${process.env.OLD_TAG} => ${process.env.NEW_TAG})`;
+            const pulls = await github.paginate(github.rest.pulls.list, {
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              state: 'open',
+              per_page: 100,
+            });
+            const pr = pulls.find(item => item.title === expectedTitle);
+            if (!pr) {
+              core.setOutput('found', 'false');
+              core.info(`No open PR found for title: ${expectedTitle}`);
+              return;
+            }
+            core.setOutput('found', 'true');
+            core.setOutput('number', String(pr.number));
+
+      - name: Fetch release-note comment helper
+        if: steps.target-pr.outputs.found == 'true'
+        run: |
+          set -euo pipefail
+          cat > "${RUNNER_TEMP}/comment_component_release_notes.py" <<'PY'
+          from __future__ import annotations
+          
+          import json
+          import os
+          import re
+          import subprocess
+          from typing import Any
+          
+          
+          def gh_api(token: str, path: str, method: str = "GET", payload: dict[str, str] | None = None) -> Any:
+              """Call GitHub API via gh CLI with a specific token and return parsed JSON."""
+              env = dict(os.environ)
+              env["GH_TOKEN"] = token
+              cmd = ["gh", "api", path]
+              if method != "GET":
+                  cmd.extend(["--method", method])
+              if payload:
+                  for key, value in payload.items():
+                      cmd.extend(["-f", f"{key}={value}"])
+              result = subprocess.run(cmd, env=env, capture_output=True, text=True, check=False)
+              if result.returncode != 0:
+                  raise RuntimeError(f"gh api failed for {path}: {result.stdout}{result.stderr}")
+              return json.loads(result.stdout)
+          
+          
+          def neutralize_mentions(value: str) -> str:
+              """Hard-disable mentions by replacing ASCII @ with fullwidth ＠."""
+              return (value or "").replace("@", "＠")
+          
+          
+          def compact_release_text(value: str, max_len: int = 180) -> str:
+              """Create a short single-line release text snippet for PR comments."""
+              text = value or ""
+              text = re.sub(r"\[([^\]]+)\]\([^)]+\)", r"\1", text)
+              text = re.sub(r"[#>*`]", " ", text)
+              text = re.sub(r"\s+", " ", text).strip()
+              text = neutralize_mentions(text)
+              if len(text) <= max_len:
+                  return text
+              return f"{text[: max_len - 1]}…"
+          
+          
+          def release_text_snippet(body: str, component_name: str) -> str:
+              """Extract the most relevant short text from release notes for a component."""
+              lines = [line.strip() for line in (body or "").splitlines() if line.strip()]
+              component_key = component_name.casefold()
+              prioritized = [line for line in lines if component_key in line.casefold()]
+              candidate = prioritized[0] if prioritized else (lines[0] if lines else "")
+              return compact_release_text(candidate)
+          
+          
+          def select_release_window(releases: list[dict[str, Any]], old_tag: str, new_tag: str) -> list[dict[str, Any]]:
+              """
+              Pick releases between old and new tag.
+          
+              Releases are expected in newest-first order.
+              """
+              if not releases:
+                  return []
+          
+              by_tag = {str(item.get("tag_name") or ""): idx for idx, item in enumerate(releases)}
+              old_idx = by_tag.get(old_tag)
+              new_idx = by_tag.get(new_tag)
+          
+              if new_idx is not None and old_idx is not None:
+                  start, end = sorted((new_idx, old_idx))
+                  if start == end:
+                      window = [releases[start]]
+                  else:
+                      window = releases[start:end]
+              elif new_idx is not None:
+                  window = releases[new_idx:]
+              elif old_idx is not None:
+                  window = releases[:old_idx]
+              else:
+                  window = releases
+          
+              return window
+          
+          
+          def find_component_matches(releases: list[dict[str, Any]], component_name: str) -> list[dict[str, str]]:
+              """Return releases where component name appears in release title/body."""
+              needle = component_name.casefold()
+              matches: list[dict[str, str]] = []
+              for release in releases:
+                  tag = str(release.get("tag_name") or "")
+                  title = str(release.get("name") or "")
+                  body = str(release.get("body") or "")
+                  url = str(release.get("html_url") or "")
+                  haystack = f"{title}\n{body}".casefold()
+                  if needle not in haystack:
+                      continue
+                  matches.append(
+                      {
+                          "tag": tag,
+                          "title": neutralize_mentions(title),
+                          "url": url,
+                          "summary": release_text_snippet(body, component_name),
+                      }
+                  )
+              return matches
+          
+          
+          def main() -> int:
+              source_owner = os.environ["SOURCE_OWNER"]
+              source_repo = os.environ["SOURCE_REPO"]
+              component_name = os.environ["COMPONENT_NAME"]
+              old_tag = os.environ["OLD_TAG"]
+              new_tag = os.environ["NEW_TAG"]
+              target_owner = os.environ["TARGET_OWNER"]
+              target_repo = os.environ["TARGET_REPO"]
+              target_pr_number = os.environ["TARGET_PR_NUMBER"]
+              source_token = os.environ["SOURCE_GH_TOKEN"]
+              target_token = os.environ["TARGET_GH_TOKEN"]
+              max_release_notes = int(os.environ.get("MAX_RELEASE_NOTES", "5"))
+              if max_release_notes < 1:
+                  max_release_notes = 1
+          
+              releases = gh_api(
+                  source_token,
+                  f"repos/{source_owner}/{source_repo}/releases?per_page=100",
+              )
+              window = select_release_window(releases, old_tag=old_tag, new_tag=new_tag)
+              matches = find_component_matches(window, component_name=component_name)
+              displayed_matches = matches[:max_release_notes]
+          
+              marker = f"<!-- k8s-components-release-notes:{component_name}:{old_tag}:{new_tag} -->"
+              comments = gh_api(
+                  target_token,
+                  f"repos/{target_owner}/{target_repo}/issues/{target_pr_number}/comments?per_page=100",
+              )
+              if any(marker in str(comment.get("body") or "") for comment in comments):
+                  print("Release-note comment already exists for this component/version transition.")
+                  return 0
+          
+              lines = [
+                  marker,
+                  f"### Component release-note matches: `{component_name}`",
+                  "",
+                  f"Searched **{len(window)}** releases between `{old_tag}` and `{new_tag}` in `{source_owner}/{source_repo}`.",
+                  "",
+              ]
+              if matches:
+                  if len(matches) > max_release_notes:
+                      lines.append(
+                          f"⚠️ **Found {len(matches)} matching release notes, but only showing the first {max_release_notes}.**"
+                      )
+                      lines.append("")
+                  lines.append("Found matches:")
+                  lines.append("")
+                  for item in displayed_matches:
+                      title = item["title"] or item["tag"]
+                      summary = item.get("summary") or ""
+                      if summary:
+                          lines.append(f"- [{title}]({item['url']}) (`{item['tag']}`) — {summary}")
+                      else:
+                          lines.append(f"- [{title}]({item['url']}) (`{item['tag']}`)")
+              else:
+                  lines.append("No release notes in the checked release window contained the component name.")
+          
+              gh_api(
+                  target_token,
+                  f"repos/{target_owner}/{target_repo}/issues/{target_pr_number}/comments",
+                  method="POST",
+                  payload={"body": "\n".join(lines)},
+              )
+              print("Posted component release-note comment on PR.")
+              return 0
+          
+          
+          if __name__ == "__main__":
+              raise SystemExit(main())
+          PY
+
+      - name: Comment PR with component release-note matches
+        if: steps.target-pr.outputs.found == 'true'
+        env:
+          SOURCE_OWNER: ${{ needs.prepare.outputs.source_owner }}
+          SOURCE_REPO: ${{ needs.prepare.outputs.source_repo }}
+          COMPONENT_NAME: ${{ matrix.component.component_name }}
+          OLD_TAG: ${{ matrix.component.old_tag }}
+          NEW_TAG: ${{ needs.prepare.outputs.latest_tag }}
+          TARGET_OWNER: ${{ github.repository_owner }}
+          TARGET_REPO: ${{ github.event.repository.name }}
+          TARGET_PR_NUMBER: ${{ steps.target-pr.outputs.number }}
+          SOURCE_GH_TOKEN: ${{ secrets.k8s_repo_token }}
+          TARGET_GH_TOKEN: ${{ github.token }}
+          MAX_RELEASE_NOTES: ${{ inputs.max_release_notes }}
+        run: |
+          set -euo pipefail
+          python "${RUNNER_TEMP}/comment_component_release_notes.py"
