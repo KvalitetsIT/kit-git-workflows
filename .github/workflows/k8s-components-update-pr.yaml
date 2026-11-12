@@ -1,0 +1,422 @@
+name: Create PR for k8s-components updates
+
+on:
+  workflow_call:
+    inputs:
+      source_repo_url:
+        description: "Exact repoURL to match in sources[].repoURL"
+        type: string
+        required: false
+        default: "git@github.com:KvalitetsIT/k8s-components.git"
+      prod-app-of-apps-file-path:
+        description: "Full path to the app-of-apps values-prod file that uses argocd-apps-chart"
+        type: string
+        required: true
+      target_branch:
+        description: "Branch to read app-of-apps values files from and target with the update PRs"
+        type: string
+        required: false
+        default: "main"
+      workflow_scripts_ref:
+        description: "Branch or tag in KvalitetsIT/kit-git-workflows used when downloading workflow helper scripts"
+        type: string
+        required: false
+        default: "main"
+      max_prs_per_run:
+        description: "Maximum number of component PRs to create per workflow run"
+        type: number
+        required: false
+        default: 5
+      max_release_notes:
+        description: "Maximum number of matched release-note entries to include in PR comments"
+        type: number
+        required: false
+        default: 5
+      pr_labels:
+        description: "Comma-separated additional labels to apply to created PRs"
+        type: string
+        required: false
+        default: ""
+      pr_template_path:
+        description: "Path in KvalitetsIT/.github@main to PR template file"
+        type: string
+        required: false
+        default: "PULL_REQUEST_TEMPLATE.md"
+    secrets:
+      k8s_repo_token:
+        description: "Token used when calling source repo and KvalitetsIT/.github APIs"
+        required: true
+
+permissions: {}
+
+jobs:
+  prepare:
+    name: Resolve release and changed components
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    outputs:
+      source_owner: ${{ steps.source-repo.outputs.owner }}
+      source_repo: ${{ steps.source-repo.outputs.repo }}
+      latest_tag: ${{ steps.latest.outputs.tag }}
+      release_name: ${{ steps.latest.outputs.name }}
+      release_url: ${{ steps.latest.outputs.url }}
+      release_notes: ${{ steps.latest.outputs.notes }}
+      changed_components_json: ${{ steps.detect.outputs.changed_components_json }}
+      changed_components_count: ${{ steps.detect.outputs.changed_components_count }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          token: ${{ github.token }}
+          fetch-depth: 0
+          ref: ${{ inputs.target_branch }}
+          persist-credentials: false
+
+      - name: Resolve source repository
+        id: source-repo
+        env:
+          SOURCE_REPO_URL: ${{ inputs.source_repo_url }}
+        run: |
+          set -euo pipefail
+
+          url="${SOURCE_REPO_URL}"
+
+          owner_repo=""
+          if [[ "$url" =~ ^git@github\.com:([^/]+/[^/]+?)(\.git)?$ ]]; then
+            owner_repo="${BASH_REMATCH[1]}"
+          elif [[ "$url" =~ ^https://github\.com/([^/]+/[^/]+?)(\.git)?/?$ ]]; then
+            owner_repo="${BASH_REMATCH[1]}"
+          else
+            echo "::error::Unsupported source_repo_url format: ${url}"
+            exit 1
+          fi
+
+          owner_repo="${owner_repo%.git}"
+
+          owner="${owner_repo%%/*}"
+          repo="${owner_repo##*/}"
+          echo "owner=${owner}" >> "$GITHUB_OUTPUT"
+          echo "repo=${repo}" >> "$GITHUB_OUTPUT"
+
+      - name: Download workflow helper scripts
+        env:
+          GH_TOKEN: ${{ secrets.k8s_repo_token }}
+          FETCH_REF: ${{ inputs.workflow_scripts_ref }}
+        run: |
+          set -euo pipefail
+          workflow_repo="KvalitetsIT/kit-git-workflows"
+          fetch_ref="${FETCH_REF}"
+          if [[ -z "${fetch_ref}" ]]; then
+            echo "::error::Input 'workflow_scripts_ref' must be set."
+            exit 1
+          fi
+          scripts_dir="${RUNNER_TEMP}/k8s-components-update-pr-scripts"
+          mkdir -p "${scripts_dir}"
+          for script in \
+            resolve_latest_release_tag.py \
+            detect_changed_components.py \
+            update_argo_target_revision_lines.py \
+            prepare_component_pr_metadata.py \
+            find_open_pr_by_title.py \
+            comment_component_release_notes.py; do
+            gh api -H "Accept: application/vnd.github.raw" \
+              "repos/${workflow_repo}/contents/.github/scripts/k8s-components-update-pr/${script}?ref=${fetch_ref}" > "${scripts_dir}/${script}"
+          done
+
+      - name: Resolve latest release
+        id: latest
+        env:
+          GH_TOKEN: ${{ secrets.k8s_repo_token }}
+          SOURCE_OWNER: ${{ steps.source-repo.outputs.owner }}
+          SOURCE_REPO: ${{ steps.source-repo.outputs.repo }}
+        run: |
+          set -euo pipefail
+          python "${RUNNER_TEMP}/k8s-components-update-pr-scripts/resolve_latest_release_tag.py"
+
+      - name: Setup yq
+        uses: mikefarah/yq@bc5b54cb1d1f720db16c9f75c5b45384d00e5cbf # v4.44.5
+
+      - name: Detect changed components
+        id: detect
+        env:
+          TARGET_REPO_URL: ${{ inputs.source_repo_url }}
+          PROD_APP_OF_APPS_FILE_PATH: ${{ inputs['prod-app-of-apps-file-path'] }}
+          NEW_TARGET_REVISION: ${{ steps.latest.outputs.tag }}
+          MAX_PRS_PER_RUN: ${{ inputs.max_prs_per_run }}
+          GH_TOKEN: ${{ secrets.k8s_repo_token }}
+          SOURCE_OWNER: ${{ steps.source-repo.outputs.owner }}
+          SOURCE_REPO: ${{ steps.source-repo.outputs.repo }}
+        run: |
+          set -euo pipefail
+          if [[ -z "${PROD_APP_OF_APPS_FILE_PATH}" ]]; then
+            echo "::error::Input 'prod-app-of-apps-file-path' must be set."
+            exit 1
+          fi
+          if [[ ! -f "${PROD_APP_OF_APPS_FILE_PATH}" ]]; then
+            echo "::error::prod-app-of-apps-file-path does not exist: ${PROD_APP_OF_APPS_FILE_PATH}"
+            exit 1
+          fi
+
+          echo "Using prod app-of-apps file: ${PROD_APP_OF_APPS_FILE_PATH}"
+          echo "Target repo URL match: ${TARGET_REPO_URL}"
+          echo "New target revision: ${NEW_TARGET_REVISION}"
+          all_entries_json="$(
+            yq -o=json '
+              [
+                (
+                  .. | select(tag == "!!map" and has("source"))
+                  | .source
+                  | select(type == "!!map" and .path != null and .targetRevision != null)
+                  | {"repo_url": ((.repoURL // "") | tostring), "component_name": (.path | tostring), "old_tag": (.targetRevision | tostring)}
+                ),
+                (
+                  .. | select(tag == "!!map" and has("sources"))
+                  | .sources[]?
+                  | select(.path != null and .targetRevision != null)
+                  | {"repo_url": ((.repoURL // "") | tostring), "component_name": (.path | tostring), "old_tag": (.targetRevision | tostring)}
+                )
+              ] | map(select(.component_name != "" and .old_tag != ""))
+            ' "${PROD_APP_OF_APPS_FILE_PATH}"
+          )"
+          ALL_ENTRIES_JSON="${all_entries_json}" python "${RUNNER_TEMP}/k8s-components-update-pr-scripts/detect_changed_components.py"
+
+  create-component-pr:
+    name: Create PR for component
+    needs: prepare
+    if: needs.prepare.outputs.changed_components_count != '0'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+      pull-requests: write
+      issues: write
+    strategy:
+      fail-fast: false
+      matrix:
+        component: ${{ fromJson(needs.prepare.outputs.changed_components_json) }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          token: ${{ github.token }}
+          fetch-depth: 0
+          ref: ${{ inputs.target_branch }}
+          persist-credentials: false
+
+      - name: Download workflow helper scripts
+        env:
+          GH_TOKEN: ${{ secrets.k8s_repo_token }}
+          FETCH_REF: ${{ inputs.workflow_scripts_ref }}
+        run: |
+          set -euo pipefail
+          workflow_repo="KvalitetsIT/kit-git-workflows"
+          fetch_ref="${FETCH_REF}"
+          if [[ -z "${fetch_ref}" ]]; then
+            echo "::error::Input 'workflow_scripts_ref' must be set."
+            exit 1
+          fi
+          scripts_dir="${RUNNER_TEMP}/k8s-components-update-pr-scripts"
+          mkdir -p "${scripts_dir}"
+          for script in \
+            resolve_latest_release_tag.py \
+            detect_changed_components.py \
+            update_argo_target_revision_lines.py \
+            prepare_component_pr_metadata.py \
+            find_open_pr_by_title.py \
+            comment_component_release_notes.py; do
+            gh api -H "Accept: application/vnd.github.raw" \
+              "repos/${workflow_repo}/contents/.github/scripts/k8s-components-update-pr/${script}?ref=${fetch_ref}" > "${scripts_dir}/${script}"
+          done
+
+      - name: Update component targetRevision
+        id: update
+        env:
+          TARGET_REPO_URL: ${{ inputs.source_repo_url }}
+          PROD_APP_OF_APPS_FILE_PATH: ${{ inputs['prod-app-of-apps-file-path'] }}
+          NEW_TARGET_REVISION: ${{ needs.prepare.outputs.latest_tag }}
+          COMPONENT_NAME: ${{ matrix.component.component_name }}
+        run: |
+          set -euo pipefail
+          changed_files=()
+          if [[ -z "${PROD_APP_OF_APPS_FILE_PATH}" ]]; then
+            echo "::error::Input 'prod-app-of-apps-file-path' must be set."
+            exit 1
+          fi
+
+          parent_dir="$(dirname "${PROD_APP_OF_APPS_FILE_PATH}")"
+          if [[ "${parent_dir}" == "." ]]; then
+            mapfile -t candidate_files < <(git ls-files 'values-*.yaml' 'values-*.yml')
+          else
+            mapfile -t candidate_files < <(git ls-files "${parent_dir}/values-*.yaml" "${parent_dir}/values-*.yml")
+          fi
+          if [[ "${#candidate_files[@]}" -eq 0 ]]; then
+            echo "::error::No values-*.yml/yaml files found in directory: ${parent_dir}"
+            exit 1
+          fi
+
+          for file_path in "${candidate_files[@]}"; do
+            if python "${RUNNER_TEMP}/k8s-components-update-pr-scripts/update_argo_target_revision_lines.py" "${file_path}"
+            then
+              changed_files+=("${file_path}")
+            fi
+          done
+
+          {
+            if [[ "${#changed_files[@]}" -gt 0 ]]; then
+              echo "has_changes=true"
+            else
+              echo "has_changes=false"
+            fi
+            echo "changed_files<<EOF"
+            printf '%s\n' "${changed_files[@]}"
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Prepare PR metadata
+        if: steps.update.outputs.has_changes == 'true'
+        id: pr-meta
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GITHUB_REPOSITORY_OWNER: ${{ github.repository_owner }}
+          GITHUB_REPOSITORY_NAME: ${{ github.event.repository.name }}
+          COMPONENT_NAME: ${{ matrix.component.component_name }}
+          OLD_TAG: ${{ matrix.component.old_tag }}
+          COMPARE_URL: ${{ matrix.component.compare_url }}
+          PATH_DIFF_LINKS_JSON: ${{ toJson(matrix.component.path_diff_links) }}
+          TARGET_REPO_URL: ${{ inputs.source_repo_url }}
+          NEW_TAG: ${{ needs.prepare.outputs.latest_tag }}
+          RELEASE_NAME: ${{ needs.prepare.outputs.release_name }}
+          RELEASE_URL: ${{ needs.prepare.outputs.release_url }}
+          BASE_LABELS: ${{ inputs.pr_labels }}
+          AUTOUPDATE_LABEL: AutoUpdate
+        run: |
+          set -euo pipefail
+          python "${RUNNER_TEMP}/k8s-components-update-pr-scripts/prepare_component_pr_metadata.py"
+
+      - name: Fetch pull request template
+        if: steps.update.outputs.has_changes == 'true' && steps.pr-meta.outputs.skip_create != 'true'
+        env:
+          GH_TOKEN: ${{ secrets.k8s_repo_token }}
+          PR_TEMPLATE_PATH: ${{ inputs.pr_template_path }}
+        run: |
+          set -euo pipefail
+          gh api \
+            -H "Accept: application/vnd.github.raw" \
+            "repos/KvalitetsIT/.github/contents/${PR_TEMPLATE_PATH}?ref=main" > pr-template.md
+
+      - name: Commit and push component update branch
+        if: steps.update.outputs.has_changes == 'true' && steps.pr-meta.outputs.skip_create != 'true'
+        id: push-branch
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BRANCH_NAME: ${{ steps.pr-meta.outputs.branch_name }}
+          COMMIT_MESSAGE: "chore: update k8s component ${{ matrix.component.component_name }} to ${{ needs.prepare.outputs.latest_tag }}"
+          CHANGED_FILES: ${{ steps.update.outputs.changed_files }}
+        run: |
+          set -euo pipefail
+
+          git checkout -B "${BRANCH_NAME}"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          while IFS= read -r file; do
+            [[ -z "${file}" ]] && continue
+            git add "${file}"
+          done <<< "${CHANGED_FILES}"
+
+          if git diff --cached --quiet; then
+            echo "branch_name=${BRANCH_NAME}" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          git commit -m "${COMMIT_MESSAGE}"
+          git remote set-url origin "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+          git push --force-with-lease origin "${BRANCH_NAME}"
+          echo "branch_name=${BRANCH_NAME}" >> "$GITHUB_OUTPUT"
+
+      - name: Create pull request with template
+        if: steps.update.outputs.has_changes == 'true' && steps.pr-meta.outputs.skip_create != 'true'
+        id: create-pr
+        uses: devops-infra/action-pull-request@1d8aa3c4a6060a1410641f700f91353af65cc94b # v1.4.0
+        with:
+          github_token: ${{ github.token }}
+          source_branch: ${{ steps.push-branch.outputs.branch_name }}
+          repository: ${{ github.repository }}
+          target_branch: ${{ inputs.target_branch }}
+          draft: true
+          title: ${{ steps.pr-meta.outputs.pr_title }}
+          template: ${{ steps.pr-meta.outputs.template_path }}
+          old_string: "Type here"
+          new_string: ${{ steps.pr-meta.outputs.body }}
+          label: ${{ steps.pr-meta.outputs.labels }}
+          create_missing_labels: true
+          milestone: ${{ steps.pr-meta.outputs.milestone_title }}
+
+  comment-component-release-notes:
+    name: Comment component release notes
+    needs:
+      - prepare
+      - create-component-pr
+    if: needs.prepare.outputs.changed_components_count != '0'
+    runs-on: ubuntu-24.04
+    permissions:
+      pull-requests: write
+      issues: write
+    strategy:
+      fail-fast: false
+      matrix:
+        component: ${{ fromJson(needs.prepare.outputs.changed_components_json) }}
+    steps:
+      - name: Download workflow helper scripts
+        env:
+          GH_TOKEN: ${{ secrets.k8s_repo_token }}
+          FETCH_REF: ${{ inputs.workflow_scripts_ref }}
+        run: |
+          set -euo pipefail
+          workflow_repo="KvalitetsIT/kit-git-workflows"
+          fetch_ref="${FETCH_REF}"
+          if [[ -z "${fetch_ref}" ]]; then
+            echo "::error::Input 'workflow_scripts_ref' must be set."
+            exit 1
+          fi
+          scripts_dir="${RUNNER_TEMP}/k8s-components-update-pr-scripts"
+          mkdir -p "${scripts_dir}"
+          for script in \
+            resolve_latest_release_tag.py \
+            detect_changed_components.py \
+            update_argo_target_revision_lines.py \
+            prepare_component_pr_metadata.py \
+            find_open_pr_by_title.py \
+            comment_component_release_notes.py; do
+            gh api -H "Accept: application/vnd.github.raw" \
+              "repos/${workflow_repo}/contents/.github/scripts/k8s-components-update-pr/${script}?ref=${fetch_ref}" > "${scripts_dir}/${script}"
+          done
+
+      - name: Resolve target PR by title
+        id: target-pr
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TARGET_OWNER: ${{ github.repository_owner }}
+          TARGET_REPO: ${{ github.event.repository.name }}
+          EXPECTED_TITLE: "Update ${{ matrix.component.component_name }} (${{ matrix.component.old_tag }} => ${{ needs.prepare.outputs.latest_tag }})"
+        run: |
+          set -euo pipefail
+          python "${RUNNER_TEMP}/k8s-components-update-pr-scripts/find_open_pr_by_title.py"
+
+      - name: Comment PR with component release-note matches
+        if: steps.target-pr.outputs.found == 'true'
+        env:
+          SOURCE_OWNER: ${{ needs.prepare.outputs.source_owner }}
+          SOURCE_REPO: ${{ needs.prepare.outputs.source_repo }}
+          COMPONENT_NAME: ${{ matrix.component.component_name }}
+          OLD_TAG: ${{ matrix.component.old_tag }}
+          NEW_TAG: ${{ needs.prepare.outputs.latest_tag }}
+          TARGET_OWNER: ${{ github.repository_owner }}
+          TARGET_REPO: ${{ github.event.repository.name }}
+          TARGET_PR_NUMBER: ${{ steps.target-pr.outputs.number }}
+          SOURCE_GH_TOKEN: ${{ secrets.k8s_repo_token }}
+          TARGET_GH_TOKEN: ${{ github.token }}
+          MAX_RELEASE_NOTES: ${{ inputs.max_release_notes }}
+        run: |
+          set -euo pipefail
+          python "${RUNNER_TEMP}/k8s-components-update-pr-scripts/comment_component_release_notes.py"

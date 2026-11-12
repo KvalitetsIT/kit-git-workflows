@@ -10,6 +10,7 @@ This repository contains **reusable GitHub Actions workflows** that are meant to
 | [pr-description-validation.yml](.github/workflows/pr-description-validation.yml) | Validates PR descriptions: required text blocks and checklist completion. | [Docs](.github/workflows/pr-description-validation.md) |
 | [notify-slack-prs-merged-to-main-missing-production-release-labels.yaml](.github/workflows/notify-slack-prs-merged-to-main-missing-production-release-labels.yaml) | Sends a Slack reminder for merged PRs missing production release labels. | [Docs](.github/workflows/notify-slack-prs-merged-to-main-missing-production-release-labels.md) |
 | [reusable-zizmor.yaml](.github/workflows/reusable-zizmor.yaml) | Runs zizmor security analysis on GitHub Actions files and uploads SARIF results. | [Docs](.github/workflows/reusable-zizmor.md) |
+| [k8s-components-update-pr.yaml](.github/workflows/k8s-components-update-pr.yaml) | Creates PRs to keep k8s-components targetRevision references up to date for a specific `sources[].repoURL`, including release notes. | [Docs](.github/workflows/k8s-components-update-pr.md) |
 
 Each workflow has its own documentation with detailed inputs, examples, and setup instructions.
 
