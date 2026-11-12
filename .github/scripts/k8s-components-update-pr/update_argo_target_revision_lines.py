@@ -219,15 +219,31 @@ def update_file(file_path: Path, target_repo_url: str, component_name: str, new_
         i = block_start
         while i < len(lines):
             stripped = lines[i].strip()
-            if stripped and not stripped.startswith("#") and indent_of(lines[i]) <= sources_indent:
-                break
+            if stripped and not stripped.startswith("#"):
+                line_indent = indent_of(lines[i])
+                if line_indent < sources_indent:
+                    break
+                if line_indent == sources_indent and not re.match(r"^\s*-\s+", lines[i]):
+                    break
             i += 1
         block_end = i
 
+        first_outer_item_start = next(
+            (
+                idx
+                for idx in range(block_start, block_end)
+                if re.match(r"^\s*-\s+", lines[idx]) and indent_of(lines[idx]) >= sources_indent
+            ),
+            None,
+        )
+        if first_outer_item_start is None:
+            continue
+
+        outer_item_indent = indent_of(lines[first_outer_item_start])
         item_starts = [
             idx
-            for idx in range(block_start, block_end)
-            if re.match(r"^\s*-\s+", lines[idx]) and indent_of(lines[idx]) > sources_indent
+            for idx in range(first_outer_item_start, block_end)
+            if re.match(r"^\s*-\s+", lines[idx]) and indent_of(lines[idx]) == outer_item_indent
         ]
         for idx, item_start in enumerate(item_starts):
             item_end = item_starts[idx + 1] if idx + 1 < len(item_starts) else block_end

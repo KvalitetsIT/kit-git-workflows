@@ -49,8 +49,16 @@ def main() -> int:
     repo = os.environ["TARGET_REPO"]
     expected_title = os.environ["EXPECTED_TITLE"]
 
-    pulls = gh_api(f"repos/{owner}/{repo}/pulls?state=open&per_page=100")
-    pr = next((item for item in pulls if item.get("title") == expected_title), None)
+    page = 1
+    pr = None
+    while True:
+        pulls = gh_api(f"repos/{owner}/{repo}/pulls?state=open&per_page=100&page={page}")
+        if not isinstance(pulls, list):
+            break
+        pr = next((item for item in pulls if item.get("title") == expected_title), None)
+        if pr is not None or len(pulls) < 100:
+            break
+        page += 1
 
     if not pr:
         write_output("found", "false")

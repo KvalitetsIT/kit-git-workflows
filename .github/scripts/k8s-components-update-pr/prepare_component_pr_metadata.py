@@ -101,6 +101,21 @@ def list_open_pull_requests(owner: str, repo: str) -> list[dict[str, Any]]:
     return pulls
 
 
+def has_component_label(pr: dict[str, Any], component_name: str) -> bool:
+    """Return true when PR labels include the component label exactly."""
+    labels = pr.get("labels") or []
+    for label in labels:
+        if str((label or {}).get("name") or "") == component_name:
+            return True
+    return False
+
+
+def body_mentions_component(pr: dict[str, Any], component_name: str) -> bool:
+    """Match workflow-generated PR bodies that include the component bullet line."""
+    body = str(pr.get("body") or "")
+    return f"- `{component_name}`" in body
+
+
 def compose_pr_body(
     *,
     component_name: str,
@@ -193,12 +208,27 @@ def main() -> int:
     branch_name = f"{pr_branch_prefix}{suffix}"
     expected_title = render_template(pr_title_template, component_name, old_tag, new_tag)
     branch_prefix = f"{pr_branch_prefix}{component_suffix}-"
+    expected_head_repo = f"{owner}/{repo}"
+    expected_base_branch = (os.environ.get("TARGET_BRANCH") or os.environ.get("GITHUB_REF_NAME") or "").strip()
 
     write_output("branch_name", branch_name)
     write_output("pr_title", expected_title)
 
     open_pulls = list_open_pull_requests(owner, repo)
-    component_open_pulls = [pr for pr in open_pulls if str(pr.get("head", {}).get("ref", "")).startswith(branch_prefix)]
+    component_open_pulls = []
+    for pr in open_pulls:
+        head_ref = str(pr.get("head", {}).get("ref", ""))
+        if not head_ref.startswith(branch_prefix):
+            continue
+        head_repo = str((((pr.get("head") or {}).get("repo") or {}).get("full_name")) or "")
+        if head_repo != expected_head_repo:
+            continue
+        base_branch = str(((pr.get("base") or {}).get("ref")) or "")
+        if expected_base_branch and base_branch != expected_base_branch:
+            continue
+        if not has_component_label(pr, component_name) and not body_mentions_component(pr, component_name):
+            continue
+        component_open_pulls.append(pr)
 
     existing_same_title_pr = next((pr for pr in component_open_pulls if pr.get("title") == expected_title), None)
     if existing_same_title_pr:

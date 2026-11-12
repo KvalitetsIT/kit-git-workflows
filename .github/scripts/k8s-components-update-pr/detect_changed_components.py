@@ -63,6 +63,44 @@ def parse_entries() -> list[dict[str, Any]]:
     return [entry for entry in data if isinstance(entry, dict)]
 
 
+def list_open_pr_titles(owner: str, repo: str) -> set[str]:
+    """Return all open PR titles in this repository."""
+    titles: set[str] = set()
+    page = 1
+    while True:
+        result = subprocess.run(
+            ["gh", "api", f"repos/{owner}/{repo}/pulls?state=open&per_page=100&page={page}"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if result.returncode != 0:
+            break
+        try:
+            pulls = json.loads(result.stdout)
+        except json.JSONDecodeError:
+            break
+        if not isinstance(pulls, list):
+            break
+        for pr in pulls:
+            title = str((pr or {}).get("title") or "")
+            if title:
+                titles.add(title)
+        if len(pulls) < 100:
+            break
+        page += 1
+    return titles
+
+
+def render_title_template(template: str, component_name: str, old_tag: str, new_tag: str) -> str:
+    """Render known placeholders used by update PR title templates."""
+    return (
+        template.replace("{component}", component_name)
+        .replace("{old_tag}", old_tag)
+        .replace("{new_tag}", new_tag)
+    )
+
+
 def write_outputs(selected: list[dict[str, Any]]) -> None:
     """Persist workflow outputs for downstream matrix job usage."""
     output_file = os.environ.get("GITHUB_OUTPUT")
@@ -85,6 +123,10 @@ def main() -> int:
     source_owner = os.environ.get("SOURCE_OWNER", "")
     source_repo = os.environ.get("SOURCE_REPO", "")
     prod_file = os.environ.get("PROD_APP_OF_APPS_FILE_PATH", "")
+    pr_title_template = os.environ.get("PR_TITLE_TEMPLATE", "Update {component} ({old_tag} => {new_tag})")
+    target_owner = os.environ.get("GITHUB_REPOSITORY_OWNER", "")
+    target_repo = os.environ.get("GITHUB_REPOSITORY_NAME", "")
+    open_pr_titles = list_open_pr_titles(target_owner, target_repo) if target_owner and target_repo else set()
 
     all_entries = parse_entries()
     all_entries_total = len(all_entries)
@@ -102,14 +144,11 @@ def main() -> int:
     skipped_repo_mismatch = 0
     compare_api_failures = 0
     skipped_no_path_changes = 0
+    skipped_existing_open_pr = 0
     stopped_due_to_max = 0
     matched_entries_total = 0
 
     for entry in all_entries:
-        if len(selected_components) >= max_prs_per_run:
-            stopped_due_to_max = 1
-            break
-
         repo_ref = normalize_repo_ref(str(entry.get("repo_url") or ""))
         if repo_ref != target_repo_ref:
             skipped_repo_mismatch += 1
@@ -150,6 +189,15 @@ def main() -> int:
             skipped_no_path_changes += 1
             continue
 
+        expected_title = render_title_template(pr_title_template, component_name, old_tag, new_target_revision)
+        if expected_title in open_pr_titles:
+            skipped_existing_open_pr += 1
+            continue
+
+        if max_prs_per_run > 0 and len(selected_components) >= max_prs_per_run:
+            stopped_due_to_max = 1
+            break
+
         path_diff_links: list[dict[str, str]] = []
         for filename in matching_files:
             diff_sha = hashlib.sha256(filename.encode()).hexdigest()
@@ -180,6 +228,7 @@ def main() -> int:
         f"skipped_already_latest={skipped_already_latest} "
         f"compare_api_failures={compare_api_failures} "
         f"skipped_no_path_changes={skipped_no_path_changes} "
+        f"skipped_existing_open_pr={skipped_existing_open_pr} "
         f"stopped_due_to_max={stopped_due_to_max}"
     )
 

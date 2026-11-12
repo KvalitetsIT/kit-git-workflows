@@ -55,6 +55,7 @@ jobs:
     permissions:
       contents: write
       pull-requests: write
+      issues: write
     uses: KvalitetsIT/kit-git-workflows/.github/workflows/k8s-components-update-pr.yaml@main
     with:
       source_repo_url: git@github.com:KvalitetsIT/k8s-components.git

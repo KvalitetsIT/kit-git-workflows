@@ -126,6 +126,28 @@ def render_template(template: str, component: str) -> str:
     return template.replace("{component}", component)
 
 
+def list_releases_until_old_tag(
+    token: str,
+    source_owner: str,
+    source_repo: str,
+    old_tag: str,
+) -> list[dict[str, Any]]:
+    """Fetch release pages until old tag is seen or history ends."""
+    releases: list[dict[str, Any]] = []
+    page = 1
+    while True:
+        chunk = gh_api(token, f"repos/{source_owner}/{source_repo}/releases?per_page=100&page={page}")
+        if not isinstance(chunk, list):
+            break
+        releases.extend(chunk)
+        if any(str(item.get("tag_name") or "") == old_tag for item in chunk):
+            break
+        if len(chunk) < 100:
+            break
+        page += 1
+    return releases
+
+
 def main() -> int:
     source_owner = os.environ["SOURCE_OWNER"]
     source_repo = os.environ["SOURCE_REPO"]
@@ -148,7 +170,12 @@ def main() -> int:
     if max_release_notes < 1:
         max_release_notes = 1
 
-    releases = gh_api(source_token, f"repos/{source_owner}/{source_repo}/releases?per_page=100")
+    releases = list_releases_until_old_tag(
+        source_token,
+        source_owner=source_owner,
+        source_repo=source_repo,
+        old_tag=old_tag,
+    )
     window = select_release_window(releases, old_tag=old_tag, new_tag=new_tag)
     matches = find_component_matches(window, component_name=component_name)
     displayed_matches = matches[:max_release_notes]
