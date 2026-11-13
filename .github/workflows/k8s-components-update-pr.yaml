@@ -99,7 +99,8 @@ jobs:
           echo "owner=${owner}" >> "$GITHUB_OUTPUT"
           echo "repo=${repo}" >> "$GITHUB_OUTPUT"
 
-      - name: Download workflow helper scripts
+      - &download_workflow_helper_scripts
+        name: Download workflow helper scripts
         env:
           GH_TOKEN: ${{ secrets.k8s_repo_token }}
           FETCH_REF: ${{ inputs.workflow_scripts_ref }}
@@ -200,30 +201,7 @@ jobs:
           ref: ${{ inputs.target_branch }}
           persist-credentials: false
 
-      - name: Download workflow helper scripts
-        env:
-          GH_TOKEN: ${{ secrets.k8s_repo_token }}
-          FETCH_REF: ${{ inputs.workflow_scripts_ref }}
-        run: |
-          set -euo pipefail
-          workflow_repo="KvalitetsIT/kit-git-workflows"
-          fetch_ref="${FETCH_REF}"
-          if [[ -z "${fetch_ref}" ]]; then
-            echo "::error::Input 'workflow_scripts_ref' must be set."
-            exit 1
-          fi
-          scripts_dir="${RUNNER_TEMP}/k8s-components-update-pr-scripts"
-          mkdir -p "${scripts_dir}"
-          for script in \
-            resolve_latest_release_tag.py \
-            detect_changed_components.py \
-            update_argo_target_revision_lines.py \
-            prepare_component_pr_metadata.py \
-            find_open_pr_by_title.py \
-            comment_component_release_notes.py; do
-            gh api -H "Accept: application/vnd.github.raw" \
-              "repos/${workflow_repo}/contents/.github/scripts/k8s-components-update-pr/${script}?ref=${fetch_ref}" > "${scripts_dir}/${script}"
-          done
+      - *download_workflow_helper_scripts
 
       - name: Update component targetRevision
         id: update
@@ -365,30 +343,7 @@ jobs:
       matrix:
         component: ${{ fromJson(needs.prepare.outputs.changed_components_json) }}
     steps:
-      - name: Download workflow helper scripts
-        env:
-          GH_TOKEN: ${{ secrets.k8s_repo_token }}
-          FETCH_REF: ${{ inputs.workflow_scripts_ref }}
-        run: |
-          set -euo pipefail
-          workflow_repo="KvalitetsIT/kit-git-workflows"
-          fetch_ref="${FETCH_REF}"
-          if [[ -z "${fetch_ref}" ]]; then
-            echo "::error::Input 'workflow_scripts_ref' must be set."
-            exit 1
-          fi
-          scripts_dir="${RUNNER_TEMP}/k8s-components-update-pr-scripts"
-          mkdir -p "${scripts_dir}"
-          for script in \
-            resolve_latest_release_tag.py \
-            detect_changed_components.py \
-            update_argo_target_revision_lines.py \
-            prepare_component_pr_metadata.py \
-            find_open_pr_by_title.py \
-            comment_component_release_notes.py; do
-            gh api -H "Accept: application/vnd.github.raw" \
-              "repos/${workflow_repo}/contents/.github/scripts/k8s-components-update-pr/${script}?ref=${fetch_ref}" > "${scripts_dir}/${script}"
-          done
+      - *download_workflow_helper_scripts
 
       - name: Resolve target PR by title
         id: target-pr

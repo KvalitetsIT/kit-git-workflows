@@ -27,6 +27,7 @@ Default `repoURL` match value:
 - PR body includes one organization-wide search link for merged PRs that share the same labels as the created PR.
 - PR title includes component and version transition, for example `Update cert-manager (26.05.3 => 26.11.7)`.
 - Python helper scripts are stored under `.github/scripts/k8s-components-update-pr/`, downloaded from `KvalitetsIT/kit-git-workflows` at `workflow_scripts_ref`, and executed per job.
+- The repeated helper-script download step is reused with YAML anchors/aliases inside the reusable workflow file.
 - Helper scripts use environment-based parameters with defaults, so they can be reused from other workflows without changing current behavior.
 - Uses the template at `pr_template_path` from `KvalitetsIT/.github@main` and replaces `Type here` with the generated update description before PR creation. If that path does not exist, the job fails.
 - Applies `AutoUpdate` plus version/component labels, and lets `devops-infra/action-pull-request` create missing labels (`create_missing_labels: true`).
