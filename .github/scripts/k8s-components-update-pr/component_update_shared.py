@@ -1,85 +1,118 @@
 """
-Responsibility: update only Argo component `targetRevision` values that match one repository+component pair.
+Shared helpers for k8s-components update scripts.
 
-This script intentionally preserves file formatting by editing only the matched value token on
-matched `targetRevision` lines. It supports both:
-- `source:` map structure
-- `sources:` array structure
+This file contains the common building blocks used by:
+- detect_components_for_update.py
+- update_component_target_revisions.py
 
-Exit codes:
-- 0: file changed
-- 1: no change
-- 2: usage error
+Goal:
+Keep one shared place for normalization and YAML matching rules so behavior
+stays predictable and easy to maintain.
 """
 
 from __future__ import annotations
 
-import os
 import re
-import sys
 from pathlib import Path
 
 
-def indent_of(line: str) -> int:
-    """Return leading-space indentation width for one YAML line."""
-    return len(line) - len(line.lstrip(" "))
+# Why this exists:
+# Some files may contain tabs in indentation. YAML tools and regex logic can
+# behave differently when tabs are present. We normalize to spaces first so all
+# downstream logic sees a stable input format.
+def normalize_leading_tabs_to_spaces(content: str, spaces_per_tab: int = 2) -> str:
+    lines: list[str] = []
+    for line in content.splitlines(keepends=True):
+        # Keep line endings intact while normalizing only the leading indent.
+        leading_len = len(line) - len(line.lstrip(" \t"))
+        leading = line[:leading_len].replace("\t", " " * spaces_per_tab)
+        lines.append(f"{leading}{line[leading_len:]}")
+    return "".join(lines)
 
 
+# Why this exists:
+# The workflow can receive repo URLs in different forms (git@..., https://...).
+# We normalize to owner/repo so comparisons are simple and reliable.
+def normalize_repo_ref(value: str) -> str:
+    text = (value or "").replace("\r", "").strip()
+    for prefix in ("git@github.com:", "https://github.com/", "http://github.com/"):
+        if text.startswith(prefix):
+            text = text[len(prefix) :]
+    if text.endswith(".git"):
+        text = text[:-4]
+    return text.strip("/").strip()
+
+
+# Why this exists:
+# YAML values can be quoted or unquoted. We normalize that detail away before
+# comparing values.
 def normalize_yaml_scalar(value: str) -> str:
-    """Trim whitespace and unwrap matching single/double quotes."""
-    trimmed = value.strip()
+    trimmed = (value or "").strip()
     if len(trimmed) >= 2 and trimmed[0] == trimmed[-1] and trimmed[0] in {"'", '"'}:
         return trimmed[1:-1]
     return trimmed
 
 
+# Why this exists:
+# We only want to replace the value while preserving quote style if one exists.
 def replacement_value(existing_raw_value: str, new_target_revision: str) -> str:
-    """Preserve existing quote style while replacing scalar value."""
     existing_raw = existing_raw_value.strip()
     if len(existing_raw) >= 2 and existing_raw[0] == existing_raw[-1] and existing_raw[0] in {"'", '"'}:
         return f"{existing_raw[0]}{new_target_revision}{existing_raw[0]}"
     return new_target_revision
 
 
+# Why this exists:
+# We use this to reason about YAML block boundaries in the line-based updater.
+def indent_of(line: str) -> int:
+    return len(line) - len(line.lstrip(" "))
+
+
+# Why this exists:
+# We keep path comparison stable by removing common visual variations.
+def normalize_component_path(path_value: str) -> str:
+    component = normalize_yaml_scalar(path_value)
+    component = component.replace("\\", "/").lstrip("./").lstrip("/")
+    return component.rstrip("/")
+
+
+# Why this exists:
+# The updater edits only matching targetRevision lines and keeps other formatting.
 def update_source_map_block(
     *,
     lines: list[str],
     block_start: int,
     block_end: int,
     source_indent: int,
-    target_repo_url: str,
+    target_repo_ref: str,
     component_name: str,
     new_target_revision: str,
 ) -> bool:
-    """Update one `source:` map block when repo/path/targetRevision all match."""
     field_indent = None
     for line_idx in range(block_start, block_end):
         stripped = lines[line_idx].strip()
         if not stripped or stripped.startswith("#"):
             continue
         line_indent = indent_of(lines[line_idx])
-        if line_indent > source_indent:
-            if field_indent is None or line_indent < field_indent:
-                field_indent = line_indent
+        if line_indent > source_indent and (field_indent is None or line_indent < field_indent):
+            field_indent = line_indent
     if field_indent is None:
         return False
 
+    repo_url_seen = False
     repo_url_matches = False
     target_line_idx = None
     target_line_match = None
     component_matches = False
-
     for line_idx in range(block_start, block_end):
         stripped = lines[line_idx].strip()
-        if not stripped or stripped.startswith("#"):
-            continue
-        line_indent = indent_of(lines[line_idx])
-        if line_indent != field_indent:
+        if not stripped or stripped.startswith("#") or indent_of(lines[line_idx]) != field_indent:
             continue
 
         repo_match = re.match(r"^\s*repoURL:\s*([^#\r\n]+?)\s*(?:#.*)?\r?\n?$", lines[line_idx])
         if repo_match:
-            repo_url_matches = normalize_yaml_scalar(repo_match.group(1)) == target_repo_url
+            repo_url_seen = True
+            repo_url_matches = normalize_repo_ref(normalize_yaml_scalar(repo_match.group(1))) == target_repo_ref
 
         target_match = re.match(r"^(\s*targetRevision:\s*)([^#\r\n]+?)(\s*(?:#.*)?)(\r?\n?)$", lines[line_idx])
         if target_match:
@@ -88,10 +121,18 @@ def update_source_map_block(
 
         path_match = re.match(r"^\s*path:\s*([^#\r\n]+?)\s*(?:#.*)?\r?\n?$", lines[line_idx])
         if path_match:
-            component_matches = normalize_yaml_scalar(path_match.group(1)) == component_name
+            component_matches = normalize_component_path(path_match.group(1)) == component_name
 
-    if not repo_url_matches or target_line_idx is None or target_line_match is None or not component_matches:
+    # If repoURL is not explicitly present in the block, it may come from a YAML
+    # merge/anchor. In that case we allow update based on component/path match.
+    if (repo_url_seen and not repo_url_matches) or not component_matches:
         return False
+
+    # If targetRevision is inherited (no explicit line in this block), add one.
+    if target_line_idx is None or target_line_match is None:
+        new_line = f"{' ' * field_indent}targetRevision: {new_target_revision}\n"
+        lines.insert(block_end, new_line)
+        return True
 
     current_value = normalize_yaml_scalar(target_line_match.group(2))
     if current_value == new_target_revision:
@@ -104,17 +145,19 @@ def update_source_map_block(
     return True
 
 
+# Why this exists:
+# Same as above, but for one item inside `sources:`.
 def update_one_sources_item(
     *,
     lines: list[str],
     item_start: int,
     item_end: int,
     item_indent: int,
-    target_repo_url: str,
+    target_repo_ref: str,
     component_name: str,
     new_target_revision: str,
 ) -> bool:
-    """Update one `sources[]` item when repo/path/targetRevision all match."""
+    repo_url_seen = False
     repo_url_matches = False
     target_line_idx = None
     target_line_match = None
@@ -122,7 +165,8 @@ def update_one_sources_item(
 
     item_start_repo_match = re.match(r"^\s*-\s*repoURL:\s*([^#\r\n]+?)\s*(?:#.*)?\r?\n?$", lines[item_start])
     if item_start_repo_match:
-        repo_url_matches = normalize_yaml_scalar(item_start_repo_match.group(1)) == target_repo_url
+        repo_url_seen = True
+        repo_url_matches = normalize_repo_ref(normalize_yaml_scalar(item_start_repo_match.group(1))) == target_repo_ref
 
     item_start_target_match = re.match(r"^(\s*-\s*targetRevision:\s*)([^#\r\n]+?)(\s*(?:#.*)?)(\r?\n?)$", lines[item_start])
     if item_start_target_match:
@@ -131,7 +175,7 @@ def update_one_sources_item(
 
     item_start_path_match = re.match(r"^\s*-\s*path:\s*([^#\r\n]+?)\s*(?:#.*)?\r?\n?$", lines[item_start])
     if item_start_path_match:
-        component_matches = normalize_yaml_scalar(item_start_path_match.group(1)) == component_name
+        component_matches = normalize_component_path(item_start_path_match.group(1)) == component_name
 
     field_indent = None
     for line_idx in range(item_start + 1, item_end):
@@ -139,22 +183,21 @@ def update_one_sources_item(
         if not stripped or stripped.startswith("#"):
             continue
         line_indent = indent_of(lines[line_idx])
-        if line_indent > item_indent:
-            if field_indent is None or line_indent < field_indent:
-                field_indent = line_indent
+        if line_indent > item_indent and (field_indent is None or line_indent < field_indent):
+            field_indent = line_indent
 
     if field_indent is not None:
         for line_idx in range(item_start + 1, item_end):
             stripped = lines[line_idx].strip()
-            if not stripped or stripped.startswith("#"):
-                continue
-            line_indent = indent_of(lines[line_idx])
-            if line_indent != field_indent:
+            if not stripped or stripped.startswith("#") or indent_of(lines[line_idx]) != field_indent:
                 continue
 
             repo_match = re.match(r"^\s*repoURL:\s*([^#\r\n]+?)\s*(?:#.*)?\r?\n?$", lines[line_idx])
             if repo_match:
-                repo_url_matches = repo_url_matches or (normalize_yaml_scalar(repo_match.group(1)) == target_repo_url)
+                repo_url_seen = True
+                repo_url_matches = repo_url_matches or (
+                    normalize_repo_ref(normalize_yaml_scalar(repo_match.group(1))) == target_repo_ref
+                )
 
             target_match = re.match(r"^(\s*targetRevision:\s*)([^#\r\n]+?)(\s*(?:#.*)?)(\r?\n?)$", lines[line_idx])
             if target_match:
@@ -163,10 +206,19 @@ def update_one_sources_item(
 
             path_match = re.match(r"^\s*path:\s*([^#\r\n]+?)\s*(?:#.*)?\r?\n?$", lines[line_idx])
             if path_match:
-                component_matches = component_matches or (normalize_yaml_scalar(path_match.group(1)) == component_name)
+                component_matches = component_matches or (normalize_component_path(path_match.group(1)) == component_name)
 
-    if not repo_url_matches or target_line_idx is None or target_line_match is None or not component_matches:
+    # If repoURL is not explicitly present in this item, it may be inherited
+    # from a YAML merge/anchor. Then we allow update based on component/path.
+    if (repo_url_seen and not repo_url_matches) or not component_matches:
         return False
+
+    # If targetRevision is inherited (no explicit line in this item), add one.
+    if target_line_idx is None or target_line_match is None:
+        insert_indent = field_indent if field_indent is not None else (item_indent + 2)
+        new_line = f"{' ' * insert_indent}targetRevision: {new_target_revision}\n"
+        lines.insert(item_end, new_line)
+        return True
 
     current_value = normalize_yaml_scalar(target_line_match.group(2))
     if current_value == new_target_revision:
@@ -179,16 +231,22 @@ def update_one_sources_item(
     return True
 
 
-def update_file(file_path: Path, target_repo_url: str, component_name: str, new_target_revision: str) -> bool:
-    """Update targetRevision lines for matching Argo source/sources entries in one file."""
-    original = file_path.read_text(encoding="utf-8")
-    lines = original.splitlines(keepends=True)
+# Why this exists:
+# Shared line-based update engine used by the update entry script.
+def update_file_for_component(
+    file_path: Path,
+    target_repo_ref: str,
+    component_name: str,
+    new_target_revision: str,
+) -> bool:
+    normalized = normalize_leading_tabs_to_spaces(file_path.read_text(encoding="utf-8"))
+    lines = normalized.splitlines(keepends=True)
     changed = False
 
     i = 0
     while i < len(lines):
-        source_single_match = re.match(r"^(\s*)source:\s*(?:#.*)?\r?\n?$", lines[i])
-        sources_match = re.match(r"^(\s*)sources:\s*(?:#.*)?\r?\n?$", lines[i])
+        source_single_match = re.match(r"^(\s*)(?:-\s*)?source:\s*(?:#.*)?\r?\n?$", lines[i])
+        sources_match = re.match(r"^(\s*)(?:-\s*)?sources:\s*(?:#.*)?\r?\n?$", lines[i])
         if not source_single_match and not sources_match:
             i += 1
             continue
@@ -208,7 +266,7 @@ def update_file(file_path: Path, target_repo_url: str, component_name: str, new_
                 block_start=block_start,
                 block_end=block_end,
                 source_indent=source_indent,
-                target_repo_url=target_repo_url,
+                target_repo_ref=target_repo_ref,
                 component_name=component_name,
                 new_target_revision=new_target_revision,
             ) or changed
@@ -247,13 +305,12 @@ def update_file(file_path: Path, target_repo_url: str, component_name: str, new_
         ]
         for idx, item_start in enumerate(item_starts):
             item_end = item_starts[idx + 1] if idx + 1 < len(item_starts) else block_end
-            item_indent = indent_of(lines[item_start])
             changed = update_one_sources_item(
                 lines=lines,
                 item_start=item_start,
                 item_end=item_end,
-                item_indent=item_indent,
-                target_repo_url=target_repo_url,
+                item_indent=indent_of(lines[item_start]),
+                target_repo_ref=target_repo_ref,
                 component_name=component_name,
                 new_target_revision=new_target_revision,
             ) or changed
@@ -261,22 +318,3 @@ def update_file(file_path: Path, target_repo_url: str, component_name: str, new_
     if changed:
         file_path.write_text("".join(lines), encoding="utf-8")
     return changed
-
-
-def main() -> int:
-    if len(sys.argv) != 2:
-        print("Usage: update_argo_target_revision_lines.py <file_path>", file=sys.stderr)
-        return 2
-
-    file_path = Path(sys.argv[1])
-    changed = update_file(
-        file_path=file_path,
-        target_repo_url=os.environ["TARGET_REPO_URL"],
-        component_name=os.environ["COMPONENT_NAME"],
-        new_target_revision=os.environ["NEW_TARGET_REVISION"],
-    )
-    return 0 if changed else 1
-
-
-if __name__ == "__main__":
-    raise SystemExit(main())

@@ -21,16 +21,19 @@ Default `repoURL` match value:
 ## Behavior and scope
 
 - Supports both `source` and `sources[]` Argo formats.
-- Candidate components are read from `prod-app-of-apps-file-path` on `target_branch` (default `main`).
+- Candidate components are read from `prod-app-of-apps-file-path` on `target_branch` (required input).
 - A component is selected only when compare `<old_tag>...<new_tag>` contains changed files under that component `path`.
 - PR body includes the full compare link and per-file SHA-256 compare anchor links.
 - PR body includes one organization-wide search link for merged PRs that share the same labels as the created PR.
 - PR title includes component and version transition, for example `Update cert-manager (26.05.3 => 26.11.7)`.
-- Python helper scripts are stored under `.github/scripts/k8s-components-update-pr/`, downloaded from `KvalitetsIT/kit-git-workflows` at `workflow_scripts_ref`, and executed per job.
-- The repeated helper-script download step is reused with YAML anchors/aliases inside the reusable workflow file.
+- Python helper scripts are stored under `.github/scripts/k8s-components-update-pr/`, downloaded once from `KvalitetsIT/kit-git-workflows` at `workflow_scripts_ref` (or the currently running workflow ref when omitted), uploaded as an artifact, and consumed by downstream jobs.
 - Helper scripts use environment-based parameters with defaults, so they can be reused from other workflows without changing current behavior.
+- Detection and update are split into reusable helper scripts:
+  - `detect_components_for_update.py` (finds eligible components)
+  - `update_component_target_revisions.py` (applies `targetRevision` updates)
+  - `component_update_shared.py` (shared normalization and matching helpers)
 - Uses the template at `pr_template_path` from `KvalitetsIT/.github@main` and replaces `Type here` with the generated update description before PR creation. If that path does not exist, the job fails.
-- Applies `AutoUpdate` plus version/component labels, and lets `devops-infra/action-pull-request` create missing labels (`create_missing_labels: true`).
+- Applies `AutoUpdate` plus version/component labels directly via `peter-evans/create-pull-request`.
 - `Chart.yaml` files are excluded.
 - Creates one PR per selected component path (for example `reflector`), and updates matching component entries in all `values-*.yml`/`values-*.yaml` files in the same directory as `prod-app-of-apps-file-path`.
 - Closes existing open PRs for the same component before creating the new PR, except when an open PR already exists with the exact same title (that PR is kept).
@@ -39,8 +42,9 @@ Default `repoURL` match value:
 - When old component PRs are closed, the new PR inherits milestone from the first matching old PR that had a milestone.
 - No PR is created when there are no changes.
 - File updates only change `targetRevision` value lines for matching component entries, preserving existing indentation/formatting.
+- Before detection/update, leading indentation tabs are normalized to spaces for deterministic parser behavior.
 - Helper Python scripts are executed in isolated mode (`python -I`) to avoid user-site/environment injection.
-- Push to component branches uses an authenticated one-shot push URL and does not persist auth token in `.git/config`.
+- PR branch commit/push is handled by `peter-evans/create-pull-request`.
 - The run fails if `prod-app-of-apps-file-path` does not exist or if zero eligible components are detected after compare checks.
 - After PR creation, a separate job can add a PR comment with release-note matches containing the component name between old and new version (max entries is configurable by `max_release_notes`, default `5`).
 
@@ -76,8 +80,8 @@ jobs:
 | ----------------- | ------ | ---------------------------------------------------- | ------------------------------------------------- | -------- |
 | `source_repo_url` | string | Exact repoURL to match in `sources[].repoURL`.      | `git@github.com:KvalitetsIT/k8s-components.git`  | false    |
 | `prod-app-of-apps-file-path` | string | Full path to the app-of-apps `values-prod` file that uses `argocd-apps-chart`. | - | true |
-| `target_branch`   | string | Branch to read app-of-apps values files from and use as PR base.| `main`                                            | false    |
-| `workflow_scripts_ref` | string | Branch or tag in `KvalitetsIT/kit-git-workflows` used when downloading helper scripts. Use the same ref as in `uses:` when not using `main`. | `main` | false |
+| `target_branch`   | string | Branch to read app-of-apps values files from and use as PR base.| -                                                 | true     |
+| `workflow_scripts_ref` | string | Optional branch or tag in `KvalitetsIT/kit-git-workflows` used when downloading helper scripts. When omitted, the workflow uses its own running ref. | `""` | false |
 | `max_prs_per_run` | number | Maximum number of component PRs to create per run.  | `5`                                               | false    |
 | `max_release_notes` | number | Maximum number of matched release-note entries shown in the PR comment. | `5`                                     | false    |
 | `pr_labels`       | string | Comma-separated additional labels to apply to created PRs. | `""`                                         | false    |
