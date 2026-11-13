@@ -15,8 +15,7 @@ on:
       target_branch:
         description: "Branch to read app-of-apps values files from and target with the update PRs"
         type: string
-        required: false
-        default: "main"
+        required: true
       workflow_scripts_ref:
         description: "Branch or tag in KvalitetsIT/kit-git-workflows used when downloading workflow helper scripts"
         type: string
@@ -52,7 +51,7 @@ permissions: {}
 jobs:
   prepare:
     name: Resolve release and changed components
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-latest
     permissions:
       contents: read
     outputs:
