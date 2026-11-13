@@ -33,10 +33,13 @@ Default `repoURL` match value:
 - `Chart.yaml` files are excluded.
 - Creates one PR per selected component path (for example `reflector`), and updates matching component entries in all `values-*.yml`/`values-*.yaml` files in the same directory as `prod-app-of-apps-file-path`.
 - Closes existing open PRs for the same component before creating the new PR, except when an open PR already exists with the exact same title (that PR is kept).
+- Existing PR lookup is scoped to the configured `target_branch` base branch.
 - Newly created component update PRs are created as **Draft**.
 - When old component PRs are closed, the new PR inherits milestone from the first matching old PR that had a milestone.
 - No PR is created when there are no changes.
 - File updates only change `targetRevision` value lines for matching component entries, preserving existing indentation/formatting.
+- Helper Python scripts are executed in isolated mode (`python -I`) to avoid user-site/environment injection.
+- Push to component branches uses an authenticated one-shot push URL and does not persist auth token in `.git/config`.
 - The run fails if `prod-app-of-apps-file-path` does not exist or if zero eligible components are detected after compare checks.
 - After PR creation, a separate job can add a PR comment with release-note matches containing the component name between old and new version (max entries is configurable by `max_release_notes`, default `5`).
 

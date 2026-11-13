@@ -181,8 +181,19 @@ def compose_pr_body(
 
 
 def main() -> int:
-    owner = os.environ["GITHUB_REPOSITORY_OWNER"]
-    repo = os.environ["GITHUB_REPOSITORY_NAME"]
+    repo_full_name = os.environ.get("GITHUB_REPOSITORY", "").strip()
+    owner = os.environ.get("GITHUB_REPOSITORY_OWNER", "").strip()
+    repo = os.environ.get("GITHUB_REPOSITORY_NAME", "").strip()
+    if "/" in repo:
+        repo = repo.split("/", 1)[1].strip()
+    if repo_full_name and "/" in repo_full_name:
+        parsed_owner, parsed_repo = repo_full_name.split("/", 1)
+        if not owner:
+            owner = parsed_owner.strip()
+        if not repo:
+            repo = parsed_repo.strip()
+    if not owner or not repo:
+        raise RuntimeError("Unable to resolve repository owner/name from workflow environment")
 
     component_name = os.environ.get("COMPONENT_NAME", "").strip()
     old_tag = os.environ.get("OLD_TAG", "").strip()

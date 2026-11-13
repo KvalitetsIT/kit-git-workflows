@@ -132,10 +132,7 @@ jobs:
           SOURCE_REPO: ${{ steps.source-repo.outputs.repo }}
         run: |
           set -euo pipefail
-          python "${RUNNER_TEMP}/k8s-components-update-pr-scripts/resolve_latest_release_tag.py"
-
-      - name: Setup yq
-        uses: mikefarah/yq@bc5b54cb1d1f720db16c9f75c5b45384d00e5cbf # v4.44.5
+          python -I "${RUNNER_TEMP}/k8s-components-update-pr-scripts/resolve_latest_release_tag.py"
 
       - name: Detect changed components
         id: detect
@@ -179,7 +176,7 @@ jobs:
               ] | map(select(.component_name != "" and .old_tag != ""))
             ' "${PROD_APP_OF_APPS_FILE_PATH}"
           )"
-          ALL_ENTRIES_JSON="${all_entries_json}" python "${RUNNER_TEMP}/k8s-components-update-pr-scripts/detect_changed_components.py"
+          ALL_ENTRIES_JSON="${all_entries_json}" python -I "${RUNNER_TEMP}/k8s-components-update-pr-scripts/detect_changed_components.py"
 
   create-component-pr:
     name: Create PR for component
@@ -255,7 +252,7 @@ jobs:
           fi
 
           for file_path in "${candidate_files[@]}"; do
-            if python "${RUNNER_TEMP}/k8s-components-update-pr-scripts/update_argo_target_revision_lines.py" "${file_path}"
+            if python -I "${RUNNER_TEMP}/k8s-components-update-pr-scripts/update_argo_target_revision_lines.py" "${file_path}"
             then
               changed_files+=("${file_path}")
             fi
@@ -279,6 +276,8 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           GITHUB_REPOSITORY_OWNER: ${{ github.repository_owner }}
           GITHUB_REPOSITORY_NAME: ${{ github.event.repository.name }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          TARGET_BRANCH: ${{ inputs.target_branch }}
           COMPONENT_NAME: ${{ matrix.component.component_name }}
           OLD_TAG: ${{ matrix.component.old_tag }}
           COMPARE_URL: ${{ matrix.component.compare_url }}
@@ -291,7 +290,7 @@ jobs:
           AUTOUPDATE_LABEL: AutoUpdate
         run: |
           set -euo pipefail
-          python "${RUNNER_TEMP}/k8s-components-update-pr-scripts/prepare_component_pr_metadata.py"
+          python -I "${RUNNER_TEMP}/k8s-components-update-pr-scripts/prepare_component_pr_metadata.py"
 
       - name: Fetch pull request template
         if: steps.update.outputs.has_changes == 'true' && steps.pr-meta.outputs.skip_create != 'true'
@@ -330,8 +329,7 @@ jobs:
           fi
 
           git commit -m "${COMMIT_MESSAGE}"
-          git remote set-url origin "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
-          git push --force-with-lease origin "${BRANCH_NAME}"
+          git push --force-with-lease "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" "${BRANCH_NAME}"
           echo "branch_name=${BRANCH_NAME}" >> "$GITHUB_OUTPUT"
 
       - name: Create pull request with template
@@ -401,7 +399,7 @@ jobs:
           EXPECTED_TITLE: "Update ${{ matrix.component.component_name }} (${{ matrix.component.old_tag }} => ${{ needs.prepare.outputs.latest_tag }})"
         run: |
           set -euo pipefail
-          python "${RUNNER_TEMP}/k8s-components-update-pr-scripts/find_open_pr_by_title.py"
+          python -I "${RUNNER_TEMP}/k8s-components-update-pr-scripts/find_open_pr_by_title.py"
 
       - name: Comment PR with component release-note matches
         if: steps.target-pr.outputs.found == 'true'
@@ -419,4 +417,4 @@ jobs:
           MAX_RELEASE_NOTES: ${{ inputs.max_release_notes }}
         run: |
           set -euo pipefail
-          python "${RUNNER_TEMP}/k8s-components-update-pr-scripts/comment_component_release_notes.py"
+          python -I "${RUNNER_TEMP}/k8s-components-update-pr-scripts/comment_component_release_notes.py"
